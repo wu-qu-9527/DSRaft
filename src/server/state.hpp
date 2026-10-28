@@ -1,0 +1,37 @@
+#pragma once
+
+#include <cstdint>
+#include <optional>
+
+namespace zmq_template::server {
+
+enum class Role {
+    Follower,
+    Candidate,
+    Leader,
+};
+
+// Process-wide server state, owned by the server's event-loop thread.
+inline Role role{Role::Follower};
+
+// In-memory only: term and voted_for must eventually be persisted before replies.
+struct VoteState {
+    std::uint64_t current_term{0};
+    std::optional<std::uint64_t> voted_for;
+    std::uint64_t last_log_index{0};
+    std::uint64_t last_log_term{0};
+    std::uint64_t commit_index{0};
+    std::optional<std::uint64_t> leader_id;
+};
+inline VoteState vote_state;
+
+constexpr const char* to_string(Role value) noexcept {
+    switch (value) {
+    case Role::Follower: return "Follower";
+    case Role::Candidate: return "Candidate";
+    case Role::Leader: return "Leader";
+    }
+    return "Unknown";
+}
+
+} // namespace zmq_template::server

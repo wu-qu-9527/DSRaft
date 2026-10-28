@@ -18,42 +18,37 @@ TEST(ElectionTimer, StartsWithRandomTimeoutWithinConfiguredRange) {
     }
 }
 
-TEST(ElectionTimer, FollowerBecomesCandidateOnlyAtDeadline) {
+TEST(ElectionTimer, ExpiresOnlyAtDeadline) {
     const auto now = Clock::time_point{};
     ElectionTimer timer{200ms, 200ms, now};
-    Role role = Role::Follower;
-    EXPECT_FALSE(timer.tick(role, now + 199ms));
-    EXPECT_EQ(role, Role::Follower);
-    EXPECT_TRUE(timer.tick(role, now + 200ms));
-    EXPECT_EQ(role, Role::Candidate);
-    EXPECT_EQ(timer.remaining(now + 200ms), 200ms);
+    EXPECT_FALSE(timer.expired(now + 199ms));
+    EXPECT_FALSE(timer.expired(now + 200ms - 1ns));
+    EXPECT_TRUE(timer.expired(now + 200ms));
 }
 
-TEST(ElectionTimer, CandidateRearmsOnRepeatedElectionTimeout) {
+TEST(ElectionTimer, ResetRearmsAfterExpiry) {
     const auto now = Clock::time_point{};
     ElectionTimer timer{200ms, 200ms, now};
-    Role role = Role::Candidate;
-    EXPECT_TRUE(timer.tick(role, now + 200ms));
-    EXPECT_FALSE(timer.tick(role, now + 399ms));
-    EXPECT_TRUE(timer.tick(role, now + 400ms));
-    EXPECT_EQ(role, Role::Candidate);
+    EXPECT_TRUE(timer.expired(now + 200ms));
+    timer.reset(now + 200ms);
+    EXPECT_FALSE(timer.expired(now + 399ms));
+    EXPECT_TRUE(timer.expired(now + 400ms));
 }
 
 TEST(ElectionTimer, ResetPostponesExpiry) {
     const auto now = Clock::time_point{};
     ElectionTimer timer{200ms, 200ms, now};
     timer.reset(now + 100ms);
-    Role role = Role::Follower;
-    EXPECT_FALSE(timer.tick(role, now + 200ms));
-    EXPECT_TRUE(timer.tick(role, now + 300ms));
+    EXPECT_FALSE(timer.expired(now + 200ms));
+    EXPECT_TRUE(timer.expired(now + 300ms));
 }
 
-TEST(ElectionTimer, LeaderDoesNotStartElection) {
+TEST(ElectionTimer, CheckingExpiryDoesNotResetDeadline) {
     const auto now = Clock::time_point{};
-    ElectionTimer timer{200ms, 200ms, now};
-    Role role = Role::Leader;
-    EXPECT_FALSE(timer.tick(role, now + 500ms));
-    EXPECT_EQ(role, Role::Leader);
+    const ElectionTimer timer{200ms, 200ms, now};
+    EXPECT_TRUE(timer.expired(now + 200ms));
+    EXPECT_TRUE(timer.expired(now + 500ms));
+    EXPECT_EQ(timer.remaining(now + 200ms), 0ms);
 }
 
 TEST(ElectionTimer, RemainingTimeRoundsUpAndStopsAtZero) {

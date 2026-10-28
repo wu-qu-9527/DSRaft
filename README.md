@@ -122,12 +122,15 @@ CMakePresets.json               # Ninja Debug / Release 配置
 cmake/Dependencies.cmake        # 固定版本下载或使用本机依赖
 scripts/start_demo.sh          # GNOME Terminal + tmux K 个 server + client 启动脚本
 src/
-  server/main.cpp              # REP 服务端
-  server/state.hpp             # 全局角色、任期、已投票节点和日志末尾元数据
+  server/main.cpp              # 帮助信息、日志初始化、配置解析和服务入口
+  server/server.hpp            # server 类、实例角色和 wait_util_stop 接口
+  server/server.cpp            # 服务初始化、RPC 事件循环与停止处理
+  server/state.hpp             # 角色类型、任期、已投票节点和日志末尾元数据
   server/vote_handler.hpp      # voteFor：接收 RequestVote 并返回结果
   server/rpc/peer_rpc.hpp          # requestVoteFor：节点间异步 REQ/REP 调用
-  server/node_config.hpp       # 节点 ID 和固定 peer 配置声明
-  server/node_config.cpp       # 命令行配置解析与校验
+  server/node_config.hpp       # 节点 ID 和固定 peer 配置数据结构
+  server/config_parser.hpp     # 命令行配置解析接口
+  server/config_parser.cpp     # 命令行配置解析与校验
   server/rpc/vote_rpc.hpp          # RequestVote 请求与响应结构体
   server/rpc/vote_rpc.cpp          # 投票 RPC 编解码
   server/rpc/heartbeat_rpc.hpp     # 空 AppendEntries 心跳请求与响应
@@ -145,7 +148,7 @@ src/
 cmake/Testing.cmake             # GoogleTest 依赖配置
 tests/message_test.cpp         # GoogleTest 序列化与协议校验测试
 tests/messaging_test.cpp       # GoogleTest REQ/REP 请求响应测试
-tests/election_timer_test.cpp  # 选举超时、重置与角色转换测试
+tests/election_timer_test.cpp  # 选举超时判断、显式重置与剩余时间测试
 tests/vote_rpc_test.cpp        # 投票协议与投票规则测试
 tests/node_election_test.cpp   # 节点计票和节点间 RPC、超时恢复测试
 tests/heartbeat_test.cpp       # 心跳协议、定时器、任期及收发测试

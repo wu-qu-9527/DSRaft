@@ -11,9 +11,6 @@ enum class Role {
     Leader,
 };
 
-// Process-wide server state, owned by the server's event-loop thread.
-inline Role role{Role::Follower};
-
 // In-memory only: term and voted_for must eventually be persisted before replies.
 struct VoteState {
     std::uint64_t current_term{0};

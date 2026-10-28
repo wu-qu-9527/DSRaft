@@ -2,7 +2,6 @@
 
 #include <cstdint>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace zmq_template::server {
@@ -17,8 +16,5 @@ struct NodeConfig {
     std::string endpoint{"tcp://127.0.0.1:5555"};
     std::vector<PeerConfig> peers;
 };
-
-std::uint64_t parse_node_id(std::string_view text);
-NodeConfig parse_node_config(int argc, char* argv[]);
 
 } // namespace zmq_template::server

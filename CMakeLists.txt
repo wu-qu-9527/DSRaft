@@ -25,11 +25,14 @@ target_include_directories(zmq_logging PUBLIC "${PROJECT_SOURCE_DIR}/src")
 target_link_libraries(zmq_logging PUBLIC spdlog::spdlog)
 
 add_library(zmq_server_core
-    src/server/node_config.cpp
+    src/server/server.cpp
+    src/server/config_parser.cpp
     src/server/rpc/vote_rpc.cpp
     src/server/rpc/heartbeat_rpc.cpp)
 add_library(zmq_template::server_core ALIAS zmq_server_core)
-target_link_libraries(zmq_server_core PUBLIC zmq_template::messaging)
+target_link_libraries(zmq_server_core
+    PUBLIC zmq_template::messaging
+    PRIVATE zmq_template::logging)
 set_target_properties(zmq_server_core PROPERTIES CXX_EXTENSIONS OFF)
 if(MSVC)
     target_compile_options(zmq_server_core PRIVATE /W4 /permissive-)

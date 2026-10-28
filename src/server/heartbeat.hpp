@@ -2,6 +2,7 @@
 
 #include "server/rpc/heartbeat_rpc.hpp"
 #include "server/election_timer.hpp"
+#include "server/state.hpp"
 
 #include <algorithm>
 

@@ -1,7 +1,5 @@
 #pragma once
 
-#include "server/state.hpp"
-
 #include <chrono>
 #include <random>
 #include <stdexcept>
@@ -38,12 +36,8 @@ public:
 
     Milliseconds timeout() const noexcept { return timeout_; }
 
-    // The node starts its next election round after this returns true.
-    bool tick(Role& current_role, Clock::time_point now = Clock::now()) {
-        if (current_role == Role::Leader || now < deadline_) return false;
-        current_role = Role::Candidate;
-        reset(now);
-        return true;
+    bool expired(Clock::time_point now = Clock::now()) const {
+        return now >= deadline_;
     }
 
 private:

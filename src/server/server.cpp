@@ -1,0 +1,222 @@
+#include "server/server.hpp"
+#include "common/messaging.hpp"
+#include "common/logging.hpp"
+#include "server/state.hpp"
+#include "server/election_timer.hpp"
+#include "server/vote_handler.hpp"
+#include "server/election.hpp"
+#include "server/rpc/peer_rpc.hpp"
+#include "server/heartbeat.hpp"
+
+#include <algorithm>
+#include <cerrno>
+#include <csignal>
+#include <exception>
+#include <stdexcept>
+#include <utility>
+
+namespace {
+volatile std::sig_atomic_t stop_requested = 0;
+void request_stop(int) { stop_requested = 1; }
+} // namespace
+
+namespace zmq_template::server {
+
+struct server::Runtime {
+    explicit Runtime(const NodeConfig& config, VoteState& state, Role& role)
+        : election(config, state, role) {}
+
+    // Keep context before sockets so it is destroyed after all connections.
+    zmq::context_t context{1};
+    zmq::socket_t socket{context, zmq::socket_type::rep};
+    ElectionTimer election_timer;
+    Election election;
+    HeartbeatTimer heartbeat_timer;
+    bool leader_active{false};
+    std::uint64_t heartbeat_term{0};
+    std::vector<PeerRpc> peers;
+    std::uint32_t next_rpc_id{0};
+};
+
+server::server(NodeConfig config) : config_(std::move(config)) {}
+
+int server::wait_util_stop() {
+    try {
+        return run(config_);
+    } catch (const std::exception& error) {
+        spdlog::error("Server error: {}", error.what());
+        return 1;
+    }
+}
+
+std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
+    stop_requested = 0;
+    auto runtime = std::make_unique<Runtime>(config, vote_state, role_);
+    zmq_template::configure_socket(runtime->socket);
+    // Poll owns the wait; a slow/disconnected peer must not block elections.
+    runtime->socket.set(zmq::sockopt::rcvtimeo, 0);
+    runtime->socket.set(zmq::sockopt::sndtimeo, 0);
+    runtime->socket.bind(config.endpoint);
+    std::signal(SIGINT, request_stop);
+    std::signal(SIGTERM, request_stop);
+    for (const auto& peer : config.peers) runtime->peers.emplace_back(runtime->context, peer);
+    spdlog::info("Listening on {} node={} role={} election_timeout={}ms",
+                 runtime->socket.get(zmq::sockopt::last_endpoint), config.id,
+                 to_string(role_), runtime->election_timer.timeout().count());
+    return runtime;
+}
+
+void server::handle_request(Runtime& runtime) {
+    zmq_template::Message response;
+    try {
+        const auto message = zmq_template::receive_message(runtime.socket);
+        response.id = message.id;
+        if (message.type == zmq_template::MessageType::request_vote) {
+            const auto request = zmq_template::decode_vote_request(message);
+            const auto result = voteFor(request, vote_state, role_, runtime.election_timer);
+            response = zmq_template::make_vote_response(message.id, result);
+            spdlog::info("RequestVote candidate={} request_term={} current_term={} granted={} role={}",
+                         request.candidate_id, request.term, result.term, result.vote_granted, to_string(role_));
+        } else if (message.type == zmq_template::MessageType::heartbeat) {
+            const auto request = zmq_template::decode_heartbeat_request(message);
+            const auto result = handle_heartbeat(request, vote_state, role_, runtime.election_timer);
+            response = zmq_template::make_heartbeat_response(message.id, result);
+            spdlog::debug("Heartbeat received leader={} term={} success={}",
+                          request.leader_id, request.term, result.success);
+        } else if (message.type == zmq_template::MessageType::text) {
+            response = {zmq_template::MessageType::acknowledgement, message.id, "Hello, " + message.payload};
+        } else {
+            throw std::invalid_argument("Unsupported RPC request type");
+        }
+    } catch (const std::invalid_argument& error) {
+        response.type = zmq_template::MessageType::error;
+        response.payload = error.what();
+        spdlog::warn("Rejected invalid request: {}", error.what());
+    }
+    zmq_template::send_message(runtime.socket, response);
+    spdlog::debug("Reply sent for request id={}", response.id);
+}
+
+void server::handle_peer_response(Runtime& runtime, PeerRpc& peer) {
+    try {
+        const auto request_term = peer.request_term();
+        if (peer.request_type() == zmq_template::MessageType::heartbeat) {
+            const auto response = peer.receiveHeartbeat();
+            if (runtime.election.observe_term(response.term)) {
+                runtime.election_timer.reset();
+                spdlog::info("Higher heartbeat response term={}; stepping down to Follower", response.term);
+            }
+            spdlog::debug("Heartbeat response peer={} term={} success={}",
+                          peer.id(), response.term, response.success);
+        } else if (peer.request_type() == zmq_template::MessageType::request_vote) {
+            const auto response = peer.receiveVoteFor();
+            const auto previous_term = vote_state.current_term;
+            const auto previous_role = role_;
+            runtime.election.receiveVoteFor(peer.id(), request_term, response);
+            if (vote_state.current_term > previous_term) runtime.election_timer.reset();
+            spdlog::info("voteFor peer={} term={} granted={} votes={}/{} role={}",
+                         peer.id(), response.term, response.vote_granted,
+                         runtime.election.votes(), runtime.election.majority(), to_string(role_));
+            if (previous_role != Role::Leader && role_ == Role::Leader) {
+                spdlog::info("Node {} elected Leader term={}", config_.id, vote_state.current_term);
+            }
+        } else {
+            throw std::logic_error("Unsupported pending RPC type");
+        }
+    } catch (const std::exception& error) {
+        peer.cancel();
+        spdlog::warn("Peer RPC peer={} failed: {}", peer.id(), error.what());
+    }
+}
+
+int server::run1(const NodeConfig& config) {
+    auto runtime = initialize(config);
+    while (!stop_requested) {
+        auto wait = role_ == Role::Leader ? std::chrono::milliseconds{100}
+            : std::min(runtime->election_timer.remaining(), std::chrono::milliseconds{100});
+        if (role_ == Role::Leader) {
+            wait = runtime->leader_active && runtime->heartbeat_term == vote_state.current_term
+                ? std::min(wait, runtime->heartbeat_timer.remaining()) : std::chrono::milliseconds{0};
+        }
+        std::vector<zmq::pollitem_t> items{{runtime->socket.handle(), 0, ZMQ_POLLIN, 0}};
+        std::vector<std::size_t> polled_peers;
+        for (std::size_t i = 0; i < runtime->peers.size(); ++i) {
+            if (!runtime->peers[i].pending()) continue;
+            wait = std::min(wait, runtime->peers[i].remaining());
+            items.push_back({runtime->peers[i].handle(), 0, ZMQ_POLLIN, 0});
+            polled_peers.push_back(i);
+        }
+        try {
+            zmq::poll(items, wait);
+        } catch (const zmq::error_t& error) {
+            if (error.num() == EINTR) continue;
+            throw;
+        }
+        if (stop_requested) break;
+        if (items[0].revents & ZMQ_POLLIN) {
+            handle_request(*runtime);
+        }
+        for (std::size_t i = 0; i < polled_peers.size(); ++i) {
+            if (!(items[i + 1].revents & ZMQ_POLLIN)) continue;
+            handle_peer_response(*runtime, runtime->peers[polled_peers[i]]);
+        }
+        for (auto& peer : runtime->peers) {
+            if (peer.expired()) {
+                spdlog::warn("Peer RPC timeout peer={} type={}", peer.id(), static_cast<int>(peer.request_type()));
+                peer.cancel();
+            }
+        }
+        if (role_ != Role::Leader && runtime->election_timer.expired()) {
+            const auto request = runtime->election.start();
+            runtime->election_timer.reset();
+            spdlog::info("Node {} starts election term={} self_vote={} next_timeout={}ms",
+                         config.id, request.term, config.id, runtime->election_timer.timeout().count());
+            for (auto& peer : runtime->peers) {
+                try {
+                    peer.requestVoteFor(request, ++runtime->next_rpc_id);
+                    spdlog::debug("requestVoteFor peer={} term={}", peer.id(), request.term);
+                } catch (const std::exception& error) {
+                    peer.cancel();
+                    spdlog::warn("RequestVote send peer={} failed: {}", peer.id(), error.what());
+                }
+            }
+            if (role_ == Role::Leader) {
+                spdlog::info("Node {} elected Leader term={}", config.id, vote_state.current_term);
+            }
+        }
+        if (role_ == Role::Leader) {
+            if (!runtime->leader_active || runtime->heartbeat_term != vote_state.current_term) {
+                // Replace any outstanding election RPCs with immediate leader contact.
+                for (auto& peer : runtime->peers) peer.cancel();
+                runtime->heartbeat_timer.restart();
+                runtime->leader_active = true;
+                runtime->heartbeat_term = vote_state.current_term;
+            }
+            if (runtime->heartbeat_timer.tick()) {
+                const zmq_template::HeartbeatRequest request{vote_state.current_term, config.id,
+                    vote_state.last_log_index, vote_state.last_log_term, vote_state.commit_index};
+                for (auto& peer : runtime->peers) {
+                    if (peer.pending()) continue;
+                    try {
+                        peer.requestHeartbeat(request, ++runtime->next_rpc_id);
+                        spdlog::debug("Heartbeat sent peer={} term={}", peer.id(), request.term);
+                    } catch (const std::exception& error) {
+                        peer.cancel();
+                        spdlog::warn("Heartbeat send peer={} failed: {}", peer.id(), error.what());
+                    }
+                }
+            }
+        } else {
+            runtime->leader_active = false;
+        }
+    }
+    spdlog::info("Server stopped");
+    return 0;
+}
+
+int server::run(const NodeConfig& config)
+{
+    return run1(config);
+}
+
+} // namespace zmq_template::server

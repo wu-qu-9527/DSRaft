@@ -129,6 +129,69 @@ void server::handle_peer_response(Runtime& runtime, PeerRpc& peer) {
     }
 }
 
+void server::process_peer_timeouts(Runtime& runtime) {
+    for (auto& peer : runtime.peers) {
+        if (peer.expired()) {
+            spdlog::warn("Peer RPC timeout peer={} type={}", peer.id(), static_cast<int>(peer.request_type()));
+            peer.cancel();
+        }
+    }
+}
+
+void server::tick_follower(Runtime& runtime) {
+    runtime.leader_active = false;
+    if (runtime.election_timer.expired()) start_election(runtime);
+}
+
+void server::tick_candidate(Runtime& runtime) {
+    runtime.leader_active = false;
+    if (runtime.election_timer.expired()) start_election(runtime);
+}
+
+void server::start_election(Runtime& runtime) {
+    const auto request = runtime.election.start();
+    runtime.election_timer.reset();
+    spdlog::info("Node {} starts election term={} self_vote={} next_timeout={}ms",
+                 config_.id, request.term, config_.id, runtime.election_timer.timeout().count());
+    for (auto& peer : runtime.peers) {
+        try {
+            peer.requestVoteFor(request, ++runtime.next_rpc_id);
+            spdlog::debug("requestVoteFor peer={} term={}", peer.id(), request.term);
+        } catch (const std::exception& error) {
+            peer.cancel();
+            spdlog::warn("RequestVote send peer={} failed: {}", peer.id(), error.what());
+        }
+    }
+    if (role_ == Role::Leader) {
+        spdlog::info("Node {} elected Leader term={}", config_.id, vote_state.current_term);
+        tick_leader(runtime);
+    }
+}
+
+void server::tick_leader(Runtime& runtime) {
+    if (!runtime.leader_active || runtime.heartbeat_term != vote_state.current_term) {
+        // Replace any outstanding election RPCs with immediate leader contact.
+        for (auto& peer : runtime.peers) peer.cancel();
+        runtime.heartbeat_timer.restart();
+        runtime.leader_active = true;
+        runtime.heartbeat_term = vote_state.current_term;
+    }
+    if (runtime.heartbeat_timer.tick()) {
+        const zmq_template::HeartbeatRequest request{vote_state.current_term, config_.id,
+            vote_state.last_log_index, vote_state.last_log_term, vote_state.commit_index};
+        for (auto& peer : runtime.peers) {
+            if (peer.pending()) continue;
+            try {
+                peer.requestHeartbeat(request, ++runtime.next_rpc_id);
+                spdlog::debug("Heartbeat sent peer={} term={}", peer.id(), request.term);
+            } catch (const std::exception& error) {
+                peer.cancel();
+                spdlog::warn("Heartbeat send peer={} failed: {}", peer.id(), error.what());
+            }
+        }
+    }
+}
+
 int server::run1(const NodeConfig& config) {
     auto runtime = initialize(config);
     while (!stop_requested) {
@@ -160,54 +223,17 @@ int server::run1(const NodeConfig& config) {
             if (!(items[i + 1].revents & ZMQ_POLLIN)) continue;
             handle_peer_response(*runtime, runtime->peers[polled_peers[i]]);
         }
-        for (auto& peer : runtime->peers) {
-            if (peer.expired()) {
-                spdlog::warn("Peer RPC timeout peer={} type={}", peer.id(), static_cast<int>(peer.request_type()));
-                peer.cancel();
-            }
-        }
-        if (role_ != Role::Leader && runtime->election_timer.expired()) {
-            const auto request = runtime->election.start();
-            runtime->election_timer.reset();
-            spdlog::info("Node {} starts election term={} self_vote={} next_timeout={}ms",
-                         config.id, request.term, config.id, runtime->election_timer.timeout().count());
-            for (auto& peer : runtime->peers) {
-                try {
-                    peer.requestVoteFor(request, ++runtime->next_rpc_id);
-                    spdlog::debug("requestVoteFor peer={} term={}", peer.id(), request.term);
-                } catch (const std::exception& error) {
-                    peer.cancel();
-                    spdlog::warn("RequestVote send peer={} failed: {}", peer.id(), error.what());
-                }
-            }
-            if (role_ == Role::Leader) {
-                spdlog::info("Node {} elected Leader term={}", config.id, vote_state.current_term);
-            }
-        }
-        if (role_ == Role::Leader) {
-            if (!runtime->leader_active || runtime->heartbeat_term != vote_state.current_term) {
-                // Replace any outstanding election RPCs with immediate leader contact.
-                for (auto& peer : runtime->peers) peer.cancel();
-                runtime->heartbeat_timer.restart();
-                runtime->leader_active = true;
-                runtime->heartbeat_term = vote_state.current_term;
-            }
-            if (runtime->heartbeat_timer.tick()) {
-                const zmq_template::HeartbeatRequest request{vote_state.current_term, config.id,
-                    vote_state.last_log_index, vote_state.last_log_term, vote_state.commit_index};
-                for (auto& peer : runtime->peers) {
-                    if (peer.pending()) continue;
-                    try {
-                        peer.requestHeartbeat(request, ++runtime->next_rpc_id);
-                        spdlog::debug("Heartbeat sent peer={} term={}", peer.id(), request.term);
-                    } catch (const std::exception& error) {
-                        peer.cancel();
-                        spdlog::warn("Heartbeat send peer={} failed: {}", peer.id(), error.what());
-                    }
-                }
-            }
-        } else {
-            runtime->leader_active = false;
+        process_peer_timeouts(*runtime);
+        switch (role_) {
+        case Role::Follower:
+            tick_follower(*runtime);
+            break;
+        case Role::Candidate:
+            tick_candidate(*runtime);
+            break;
+        case Role::Leader:
+            tick_leader(*runtime);
+            break;
         }
     }
     spdlog::info("Server stopped");

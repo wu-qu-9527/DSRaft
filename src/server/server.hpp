@@ -20,6 +20,11 @@ private:
     std::unique_ptr<Runtime> initialize(const NodeConfig& config);
     void handle_request(Runtime& runtime);
     void handle_peer_response(Runtime& runtime, PeerRpc& peer);
+    void process_peer_timeouts(Runtime& runtime);
+    void tick_follower(Runtime& runtime);
+    void tick_candidate(Runtime& runtime);
+    void tick_leader(Runtime& runtime);
+    void start_election(Runtime& runtime);
 
     int run1(const NodeConfig& config);
     int run(const NodeConfig& config);

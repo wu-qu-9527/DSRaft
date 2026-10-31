@@ -14,7 +14,8 @@ Usage: ./scripts/start_demo.sh [options]
   --no-build              Use existing executables
   -h, --help              Show help
 
-Opens one GNOME Terminal window with K servers and one business client.
+Runs K servers and one business client in tmux in the current terminal.
+Inside tmux, switches the current client to the new demo session.
 Node IDs are 1..K; every server is configured with all other servers as peers.
 tmux tiles the K+1 panes; one client process connects to all K servers.
 Each pane keeps its output and opens a shell when the example exits.
@@ -66,10 +67,10 @@ nodes=$((10#$nodes))
 ((nodes >= 1)) || fail "Node count must be at least 1"
 ((base_port >= 1024 && base_port + nodes - 1 <= 65535)) || fail "Server port range must fit within 1024..65535"
 
-for dependency in tmux gnome-terminal; do
-    command -v "$dependency" >/dev/null || fail "Missing $dependency. Install with: sudo apt install tmux gnome-terminal"
+[[ -t 0 && -t 1 ]] || fail "Run this script from an interactive terminal"
+for dependency in tmux; do
+    command -v "$dependency" >/dev/null || fail "Missing $dependency. Install with: sudo apt install tmux"
 done
-[[ -n ${DISPLAY:-} || -n ${WAYLAND_DISPLAY:-} ]] || fail "Run this script from a graphical desktop session"
 if tmux has-session -t "=$session" 2>/dev/null; then
     fail "Session '$session' already exists. Attach with: tmux attach-session -t '$session'"
 fi
@@ -95,7 +96,7 @@ for ((i = 0; i < nodes; ++i)); do
     endpoints+=("tcp://127.0.0.1:$((base_port + i))")
 done
 
-# Leave enough virtual space for tiled panes before the terminal attaches.
+# Leave enough virtual space for tiled panes before attaching the current terminal.
 columns=1
 while ((columns * columns < nodes + 1)); do columns=$((columns + 1)); done
 rows=$(((nodes + 1 + columns - 1) / columns))
@@ -129,7 +130,11 @@ tmux set-window-option -t "$window" pane-border-status top
 tmux set-window-option -t "$window" pane-border-format ' #{pane_title} '
 tmux select-pane -t "$client_pane" -T client
 tmux select-pane -t "$client_pane"
-gnome-terminal --window --title="Raft demo — $session ($nodes nodes)" --geometry="${width}x${height}" -- \
-    env -u TMUX tmux attach-session -t "=$session"
+# Keep the session alive when the terminal detaches or the client disconnects.
 created=0
-printf "Started session '%s' with %s server nodes. Stop it with: tmux kill-session -t '%s'\n" "$session" "$nodes" "$session"
+printf "Started session '%s' with %s server nodes. Detach with Ctrl+b d; stop with: tmux kill-session -t '%s'\n" "$session" "$nodes" "$session"
+if [[ -n ${TMUX:-} ]]; then
+    tmux switch-client -t "=$session"
+else
+    tmux attach-session -t "=$session"
+fi

@@ -24,7 +24,8 @@ namespace zmq_template::server {
 
 struct server::Runtime {
     explicit Runtime(const NodeConfig& config, VoteState& state, Role& role)
-        : election(config, state, role) {}
+        : election_timer(config.election_timeout_min, config.election_timeout_max),
+          election(config, state, role), heartbeat_timer(config.heartbeat_interval) {}
 
     // Keep context before sockets so it is destroyed after all connections.
     zmq::context_t context{1};
@@ -59,10 +60,12 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     runtime->socket.bind(config.endpoint);
     std::signal(SIGINT, request_stop);
     std::signal(SIGTERM, request_stop);
-    for (const auto& peer : config.peers) runtime->peers.emplace_back(runtime->context, peer);
-    spdlog::info("Listening on {} node={} role={} election_timeout={}ms",
+    for (const auto& peer : config.peers) runtime->peers.emplace_back(runtime->context, peer, config.heartbeat_timeout);
+    spdlog::info("Listening on {} node={} role={} election_timeout={}ms election_range=[{},{}]ms heartbeat_interval={}ms heartbeat_timeout={}ms",
                  runtime->socket.get(zmq::sockopt::last_endpoint), config.id,
-                 to_string(role_), runtime->election_timer.timeout().count());
+                 to_string(role_), runtime->election_timer.timeout().count(),
+                 config.election_timeout_min.count(), config.election_timeout_max.count(),
+                 config.heartbeat_interval.count(), config.heartbeat_timeout.count());
     return runtime;
 }
 

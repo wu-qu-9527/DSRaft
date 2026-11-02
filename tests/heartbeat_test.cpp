@@ -106,6 +106,35 @@ TEST(HeartbeatScheduling, SendsImmediatelyThenEveryFiftyMilliseconds) {
     EXPECT_TRUE(timer.tick(now + 60ms));
 }
 
+TEST(HeartbeatScheduling, UsesConfiguredIntervalAndRejectsNonpositiveIntervals) {
+    const ElectionTimer::Clock::time_point now{};
+    HeartbeatTimer timer{120ms, now};
+    EXPECT_TRUE(timer.tick(now));
+    EXPECT_FALSE(timer.tick(now + 119ms));
+    EXPECT_TRUE(timer.tick(now + 120ms));
+    timer.restart(now + 130ms);
+    EXPECT_TRUE(timer.tick(now + 130ms));
+    EXPECT_FALSE(timer.tick(now + 249ms));
+    EXPECT_TRUE(timer.tick(now + 250ms));
+    EXPECT_THROW((HeartbeatTimer{0ms, now}), std::invalid_argument);
+    EXPECT_THROW((HeartbeatTimer{-1ms, now}), std::invalid_argument);
+}
+
+TEST(HeartbeatPeerRpc, ConfiguredTimeoutAppliesToHeartbeatButNotVoteRequests) {
+    zmq::context_t context{1};
+    zmq::socket_t receiver{context, zmq::socket_type::rep};
+    configure_socket(receiver);
+    receiver.bind("inproc://configured-heartbeat-timeout");
+    PeerRpc sender{context, {2, "inproc://configured-heartbeat-timeout"}, 350ms};
+    const auto now = PeerRpc::Clock::now();
+    sender.requestHeartbeat({1, 1, 0, 0, 0}, 1, now);
+    EXPECT_FALSE(sender.expired(now + 349ms));
+    EXPECT_TRUE(sender.expired(now + 350ms));
+    sender.requestVoteFor({2, 1, 0, 0}, 2, now);
+    EXPECT_FALSE(sender.expired(now + 99ms));
+    EXPECT_TRUE(sender.expired(now + 100ms));
+}
+
 TEST(HeartbeatPeerRpc, ExchangesHeartbeatBetweenServerSockets) {
     zmq::context_t context{1};
     zmq::socket_t receiver{context, zmq::socket_type::rep};

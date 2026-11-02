@@ -49,7 +49,7 @@ target_link_libraries(zmq_server PRIVATE zmq_template::server_core)
 if(BUILD_TESTING)
     include(cmake/Testing.cmake)
     find_package(Threads REQUIRED)
-    add_executable(zmq_tests tests/message_test.cpp tests/messaging_test.cpp tests/election_timer_test.cpp tests/vote_rpc_test.cpp tests/node_election_test.cpp tests/heartbeat_test.cpp)
+    add_executable(zmq_tests tests/config_parser_test.cpp tests/message_test.cpp tests/messaging_test.cpp tests/election_timer_test.cpp tests/vote_rpc_test.cpp tests/node_election_test.cpp tests/heartbeat_test.cpp)
     target_link_libraries(zmq_tests PRIVATE
         zmq_template::server_core GTest::gtest_main Threads::Threads)
     include(GoogleTest)

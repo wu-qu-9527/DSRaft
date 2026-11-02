@@ -32,11 +32,16 @@ inline HeartbeatResponse handle_heartbeat(
 class HeartbeatTimer {
 public:
     using Clock = ElectionTimer::Clock;
-    explicit HeartbeatTimer(Clock::time_point now = Clock::now()) : deadline_(now) {}
+    explicit HeartbeatTimer(Clock::time_point now = Clock::now())
+        : HeartbeatTimer(std::chrono::milliseconds{50}, now) {}
+    explicit HeartbeatTimer(std::chrono::milliseconds interval, Clock::time_point now = Clock::now())
+        : interval_(interval), deadline_(now) {
+        if (interval.count() <= 0) throw std::invalid_argument("Heartbeat interval must be positive");
+    }
     void restart(Clock::time_point now = Clock::now()) { deadline_ = now; }
     bool tick(Clock::time_point now = Clock::now()) {
         if (now < deadline_) return false;
-        deadline_ = now + std::chrono::milliseconds{50};
+        deadline_ = now + interval_;
         return true;
     }
     std::chrono::milliseconds remaining(Clock::time_point now = Clock::now()) const {
@@ -44,6 +49,7 @@ public:
         return std::chrono::ceil<std::chrono::milliseconds>(deadline_ - now);
     }
 private:
+    std::chrono::milliseconds interval_;
     Clock::time_point deadline_;
 };
 

@@ -343,3 +343,29 @@ SPDLOG_LEVEL=debug ./scripts/start_demo.sh --nodes 3 --no-build
 
 正常情况下选举完成后任期保持稳定；在 Leader 窗格按 `Ctrl+C` 停止它，剩余多数节点会选举新 Leader 并恢复心跳。
 心跳与投票状态仍仅保存在内存中，重启安全性依赖后续持久化实现。
+
+## 服务端计时参数
+
+服务端支持以下参数，单位均为正整数毫秒：
+
+| 参数 | 默认值 | 含义 |
+| --- | --- | --- |
+| `--heartbeat-interval-ms` | 50 | Leader 心跳发送间隔 |
+| `--heartbeat-timeout-ms` | 100 | 单次心跳 RPC 等待响应的超时；超时后取消该调用，不直接触发选举 |
+| `--election-timeout-min-ms` | 150 | 每轮随机选举超时的最小值 |
+| `--election-timeout-max-ms` | 300 | 每轮随机选举超时的最大值（包含此值） |
+
+心跳间隔必须小于选举超时最小值，最小值不能大于最大值。
+配置值上限为 2147483647ms；重复参数、缺失值、非整数及非正数会报错退出。
+选举超时最小值和最大值相等时使用固定超时；正常多节点部署建议保留随机范围。
+投票 RPC 超时仍为 100ms，不受心跳 RPC 超时参数影响。
+
+```sh
+./build/debug/zmq_server tcp://127.0.0.1:5555 --node-id 1 \
+  --peer 2=tcp://127.0.0.1:5556 --peer 3=tcp://127.0.0.1:5557 \
+  --heartbeat-interval-ms 80 --heartbeat-timeout-ms 240 \
+  --election-timeout-min-ms 400 --election-timeout-max-ms 800
+```
+
+其余节点可使用相同的计时配置；每次开始新选举、授票或接受有效 Leader 联系时，
+都会在配置范围内重新随机选取选举超时。具体生效参数会在服务启动日志中输出。

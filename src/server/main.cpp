@@ -10,7 +10,15 @@ using zmq_template::server::server;
 
 int main(int argc, char* argv[]) {
     if (argc == 2 && std::string(argv[1]) == "--help") {
-        std::cout << "Usage: zmq_server [bind_endpoint] [--node-id ID] [--peer ID=endpoint ...]\n";
+        std::cout << "Usage: zmq_server [bind_endpoint] [options]\n"
+                  << "  --node-id ID                    Positive node ID (default: 1)\n"
+                  << "  --peer ID=endpoint              Peer address; may be repeated\n"
+                  << "  --heartbeat-interval-ms MS      Heartbeat send interval (default: 50)\n"
+                  << "  --heartbeat-timeout-ms MS       Heartbeat RPC timeout (default: 100)\n"
+                  << "  --election-timeout-min-ms MS    Minimum election timeout (default: 150)\n"
+                  << "  --election-timeout-max-ms MS    Maximum election timeout (default: 300)\n"
+                  << "All times are positive integer milliseconds. Heartbeat interval must be less\n"
+                  << "than the minimum election timeout; minimum must not exceed maximum.\n";
         return 0;
     }
 

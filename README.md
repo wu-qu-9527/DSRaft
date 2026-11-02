@@ -49,15 +49,22 @@ Windows 可执行文件带 `.exe` 后缀。示例默认只监听本机，客户�
 
 ## 一键启动：K 个 server + 1 个 client
 
-在 Linux 图形桌面中安装终端依赖，然后执行：
+在 Linux 当前终端（支持 SSH）中安装 tmux，然后执行：
 
 ```sh
-sudo apt install tmux gnome-terminal
+sudo apt install tmux
 ./scripts/start_demo.sh
 ```
 
+SSH 登录后可直接运行上述命令；从本机通过一条 SSH 命令启动时，需要分配伪终端：
+
+```sh
+ssh -t user@host 'cd /path/to/Raft && ./scripts/start_demo.sh'
+```
+
 使用 `--nodes K` 指定 server 数量，默认 `K=3`。脚本会先配置并构建 server/client，
-再打开一个 GNOME Terminal 窗口，通过 tmux 自动平铺 `K+1` 个窗格。默认三节点布局示例：
+再在当前终端连接 tmux 会话，自动平铺 `K+1` 个窗格；已在 tmux 中时切换当前客户端到新会话。
+无需图形桌面或 GNOME Terminal。默认三节点布局示例：
 
 ```text
 ┌───────────────────────┬───────────────────────┐
@@ -120,7 +127,7 @@ ctest --preset debug
 CMakeLists.txt                  # 目标、编译选项和测试
 CMakePresets.json               # Ninja Debug / Release 配置
 cmake/Dependencies.cmake        # 固定版本下载或使用本机依赖
-scripts/start_demo.sh          # GNOME Terminal + tmux K 个 server + client 启动脚本
+scripts/start_demo.sh          # 当前终端 tmux K 个 server + client 启动脚本
 src/
   server/main.cpp              # 帮助信息、日志初始化、配置解析和服务入口
   server/server.hpp            # server 类、实例角色和 wait_util_stop 接口

@@ -192,7 +192,7 @@ void server::tick_leader(Runtime& runtime) {
     }
 }
 
-int server::run1(const NodeConfig& config) {
+int server::run(const NodeConfig& config) {
     auto runtime = initialize(config);
     while (!stop_requested) {
         auto wait = role_ == Role::Leader ? std::chrono::milliseconds{100}
@@ -238,11 +238,6 @@ int server::run1(const NodeConfig& config) {
     }
     spdlog::info("Server stopped");
     return 0;
-}
-
-int server::run(const NodeConfig& config)
-{
-    return run1(config);
 }
 
 } // namespace zmq_template::server

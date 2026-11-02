@@ -26,7 +26,6 @@ private:
     void tick_leader(Runtime& runtime);
     void start_election(Runtime& runtime);
 
-    int run1(const NodeConfig& config);
     int run(const NodeConfig& config);
 
     Role role_{Role::Follower};

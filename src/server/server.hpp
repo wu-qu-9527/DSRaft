@@ -2,6 +2,7 @@
 
 #include "server/node_config.hpp"
 #include "server/state.hpp"
+#include "server/storage/persistent_state.hpp"
 
 #include <memory>
 
@@ -25,11 +26,15 @@ private:
     void tick_candidate(Runtime& runtime);
     void tick_leader(Runtime& runtime);
     void start_election(Runtime& runtime);
+    void persist_state();
 
     int run(const NodeConfig& config);
 
     Role role_{Role::Follower};
     NodeConfig config_;
+    VoteState vote_state_;
+    StateStorage storage_;
+    PersistentState persisted_state_;
 };
 
 } // namespace zmq_template::server

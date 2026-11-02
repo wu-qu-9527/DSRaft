@@ -11,7 +11,7 @@ enum class Role {
     Leader,
 };
 
-// In-memory only: term and voted_for must eventually be persisted before replies.
+// The server persists term and voted_for before protocol output; log metadata is still in-memory.
 struct VoteState {
     std::uint64_t current_term{0};
     std::optional<std::uint64_t> voted_for;
@@ -20,7 +20,6 @@ struct VoteState {
     std::uint64_t commit_index{0};
     std::optional<std::uint64_t> leader_id;
 };
-inline VoteState vote_state;
 
 constexpr const char* to_string(Role value) noexcept {
     switch (value) {

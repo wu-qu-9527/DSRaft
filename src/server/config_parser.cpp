@@ -39,6 +39,9 @@ NodeConfig parse_node_config(int argc, char* argv[]) {
         }
         if (option == "--node-id") {
             config.id = parse_node_id(value);
+        } else if (option == "--data-dir") {
+            if (value.empty()) throw std::invalid_argument("Data directory must not be empty");
+            config.data_dir = value;
         } else if (option == "--heartbeat-interval-ms") {
             config.heartbeat_interval = parse_milliseconds(value);
         } else if (option == "--heartbeat-timeout-ms") {

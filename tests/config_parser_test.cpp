@@ -19,6 +19,14 @@ NodeConfig parse(std::initializer_list<std::string> options) {
     return parse_node_config(static_cast<int>(argv.size()), argv.data());
 }
 
+TEST(ConfigParser, ParsesDataDirectoryAndRejectsEmptyOrRepeatedPaths) {
+    EXPECT_TRUE(parse({}).data_dir.empty());
+    EXPECT_EQ(parse({"--data-dir", "/tmp/raft node"}).data_dir, "/tmp/raft node");
+    EXPECT_THROW(parse({"--data-dir", ""}), std::invalid_argument);
+    EXPECT_THROW(parse({"--data-dir"}), std::invalid_argument);
+    EXPECT_THROW(parse({"--data-dir", "first", "--data-dir", "second"}), std::invalid_argument);
+}
+
 TEST(ConfigParser, KeepsExistingTimingDefaults) {
     const auto config = parse({});
     EXPECT_EQ(config.heartbeat_interval, 50ms);

@@ -158,8 +158,8 @@ TEST(HeartbeatTermObservation, HigherTermReplyStepsLeaderDownAndClearsVote) {
     Election election{config, state, role};
     election.start();
     ASSERT_EQ(role, Role::Leader);
-    EXPECT_FALSE(election.observe_term(1));
-    EXPECT_TRUE(election.observe_term(2));
+    EXPECT_FALSE(election.become_follower_if_higher_term(1));
+    EXPECT_TRUE(election.become_follower_if_higher_term(2));
     EXPECT_EQ(role, Role::Follower);
     EXPECT_EQ(state.current_term, 2u);
     EXPECT_FALSE(state.voted_for.has_value());

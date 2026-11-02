@@ -28,22 +28,22 @@ TEST_F(NodeElection, StartsNewTermAndVotesForSelfOnEveryRound) {
 
 TEST_F(NodeElection, WinsWithMajorityAndIgnoresStaleOrUnknownReplies) {
     election.start();
-    election.receiveVoteFor(2, 0, {0, true});
-    election.receiveVoteFor(99, 1, {1, true});
-    election.receiveVoteFor(1, 1, {1, true});
-    election.receiveVoteFor(3, 1, {1, false});
+    election.handle_vote_response(2, 0, {0, true});
+    election.handle_vote_response(99, 1, {1, true});
+    election.handle_vote_response(1, 1, {1, true});
+    election.handle_vote_response(3, 1, {1, false});
     EXPECT_EQ(role, Role::Candidate);
     EXPECT_EQ(election.votes(), 1u);
-    election.receiveVoteFor(2, 1, {1, true});
+    election.handle_vote_response(2, 1, {1, true});
     EXPECT_EQ(role, Role::Leader);
     EXPECT_EQ(election.votes(), 2u);
 }
 
 TEST_F(NodeElection, HigherTermResponseStepsLeaderDown) {
     election.start();
-    election.receiveVoteFor(2, 1, {1, true});
+    election.handle_vote_response(2, 1, {1, true});
     ASSERT_EQ(role, Role::Leader);
-    election.receiveVoteFor(3, 1, {5, false});
+    election.handle_vote_response(3, 1, {5, false});
     EXPECT_EQ(role, Role::Follower);
     EXPECT_EQ(state.current_term, 5u);
     EXPECT_FALSE(state.voted_for.has_value());
@@ -56,11 +56,11 @@ TEST(NodeElectionCounting, DuplicateVotesDoNotFormMajority) {
     Role role{Role::Follower};
     Election election{config, state, role};
     election.start();
-    election.receiveVoteFor(2, 1, {1, true});
-    election.receiveVoteFor(2, 1, {1, true});
+    election.handle_vote_response(2, 1, {1, true});
+    election.handle_vote_response(2, 1, {1, true});
     EXPECT_EQ(election.votes(), 2u);
     EXPECT_EQ(role, Role::Candidate);
-    election.receiveVoteFor(3, 1, {1, true});
+    election.handle_vote_response(3, 1, {1, true});
     EXPECT_EQ(role, Role::Leader);
 }
 
@@ -88,7 +88,7 @@ TEST(PeerVotingRpc, ServerNodesRequestAndRespondWithoutBusinessClient) {
     send_message(receiver, make_vote_response(incoming.id, result));
     zmq::pollitem_t item{sender.handle(), 0, ZMQ_POLLIN, 0};
     ASSERT_GT(zmq::poll(&item, 1, std::chrono::milliseconds{1000}), 0);
-    const auto response = sender.receiveVoteFor();
+    const auto response = sender.receive_vote_response();
     EXPECT_TRUE(response.vote_granted);
     EXPECT_EQ(response.term, 1u);
     EXPECT_FALSE(sender.pending());
@@ -114,7 +114,7 @@ TEST(PeerVotingRpc, TimeoutDoesNotBlockNextElectionRequest) {
     send_message(receiver, make_vote_response(second.id, {2, true}));
     zmq::pollitem_t item{sender.handle(), 0, ZMQ_POLLIN, 0};
     ASSERT_GT(zmq::poll(&item, 1, std::chrono::milliseconds{1000}), 0);
-    EXPECT_EQ(sender.receiveVoteFor().term, 2u);
+    EXPECT_EQ(sender.receive_vote_response().term, 2u);
 }
 
 } // namespace

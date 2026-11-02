@@ -105,17 +105,17 @@ void server::handle_peer_response(Runtime& runtime, PeerRpc& peer) {
         const auto request_term = peer.request_term();
         if (peer.request_type() == zmq_template::MessageType::heartbeat) {
             const auto response = peer.receiveHeartbeat();
-            if (runtime.election.observe_term(response.term)) {
+            if (runtime.election.become_follower_if_higher_term(response.term)) {
                 runtime.election_timer.reset();
                 spdlog::info("Higher heartbeat response term={}; stepping down to Follower", response.term);
             }
             spdlog::debug("Heartbeat response peer={} term={} success={}",
                           peer.id(), response.term, response.success);
         } else if (peer.request_type() == zmq_template::MessageType::request_vote) {
-            const auto response = peer.receiveVoteFor();
+            const auto response = peer.receive_vote_response();
             const auto previous_term = vote_state.current_term;
             const auto previous_role = role_;
-            runtime.election.receiveVoteFor(peer.id(), request_term, response);
+            runtime.election.handle_vote_response(peer.id(), request_term, response);
             if (vote_state.current_term > previous_term) runtime.election_timer.reset();
             spdlog::info("voteFor peer={} term={} granted={} votes={}/{} role={}",
                          peer.id(), response.term, response.vote_granted,

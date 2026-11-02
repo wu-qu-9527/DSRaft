@@ -39,7 +39,7 @@ public:
         return response;
     }
 
-    RequestVoteResponse receiveVoteFor() {
+    RequestVoteResponse receive_vote_response() {
         const auto response = decode_vote_response(receive_response(MessageType::request_vote));
         cancel();
         return response;

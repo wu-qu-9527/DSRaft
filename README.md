@@ -471,3 +471,23 @@ Leader 统计每个 Follower 的 `match_index`，并将本节点的已持久化�
 只有复制到严格多数的当前任期条目才能直接推进提交位置；此前条目随此前缀一起提交。
 每次当选都会先落盘一条当前任期的空命令 no-op，再复制给其他成员；单节点可直接提交，
 多节点缺少多数确认时不会推进。Leader 将已持久化的提交位置随下一轮 AppendEntries 传播给 Follower。
+
+## 键值业务请求
+
+客户端发送 `SET key value`、`GET key` 或 `DEL key`。键不能为空，也不能包含空白或 NUL；值可为空或包含二进制字节。
+所有命令（包括 GET）都通过日志提交后执行，因此孤立 Leader 不会成功返回新的读写结果。
+SET 返回 `OK`，GET 返回 `VALUE <值>` 或 `NOT_FOUND`，DEL 返回 `OK` 或 `NOT_FOUND`。
+
+```sh
+./build/debug/zmq_client tcp://127.0.0.1:5555 "SET name Raft"
+./build/debug/zmq_client tcp://127.0.0.1:5555 "GET name"
+./build/debug/zmq_client tcp://127.0.0.1:5555 "DEL name"
+```
+
+服务端使用 ROUTER 保存 REQ 请求的路由信封，等待提交期间仍处理其他客户端和节点 RPC。
+最多同时等待 1024 条业务命令，默认等待提交 2 秒。Follower 返回已知 Leader ID 或未知 Leader 的错误，
+客户端暂不自动寻找 Leader；`--all` 用于观察各节点响应，遇到错误时退出码为 1。
+无显式命令时客户端提交 `SET greeting Hello, ZeroMQ`。
+
+业务成功响应只在日志、提交检查点均落盘且状态机执行后发出。领导权变化、等待提交超时或断连都可能造成结果未知；
+超时后的日志仍可能随后提交。当前没有客户端请求去重，手动重试可能重复执行，不能视为恰好一次语义。

@@ -4,6 +4,7 @@
 #include "server/storage/persistent_state.hpp"
 #include "server/storage/log_storage.hpp"
 #include "server/storage/commit_storage.hpp"
+#include "server/key_value_state_machine.hpp"
 
 #include <gtest/gtest.h>
 
@@ -104,6 +105,39 @@ protected:
     std::string endpoint;
     std::unique_ptr<ServerProcess> process;
 };
+
+TEST_F(PersistentServer, SingleNodeBusinessCommandsCommitAndRecoverState) {
+    start(true);
+    for (int i = 0; i < 200 && !std::filesystem::exists(data_dir / "commit.bin"); ++i) {
+        std::this_thread::sleep_for(10ms);
+    }
+    ASSERT_EQ(call({MessageType::text, 1, "SET key value"}).payload, "OK");
+    EXPECT_EQ(call({MessageType::text, 2, "GET key"}).payload, "VALUE value");
+    start(true);
+    for (int i = 0; i < 200; ++i) {
+        const auto response = call({MessageType::text, 3, "GET key"});
+        if (response.type == MessageType::acknowledgement) {
+            EXPECT_EQ(response.payload, "VALUE value");
+            return;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    FAIL() << "Server did not recover leadership";
+}
+
+TEST_F(PersistentServer, RecoveryReplaysOnlyCommittedPrefix) {
+    start();
+    ASSERT_TRUE(decode_heartbeat_response(call(make_heartbeat_request(1,
+        {5, 2, 0, 0, 1, {{1, 4, "SET key committed"}, {2, 4, "SET key uncommitted"}}}))).success);
+    process.reset();
+    auto directory = std::make_shared<StorageDirectory>(data_dir);
+    CommitStorage commit{directory};
+    LogStorage log{directory};
+    KeyValueStateMachine machine;
+    machine.apply_committed(log.load(), commit.load().index);
+    EXPECT_EQ(machine.last_applied(), 1u);
+    EXPECT_EQ(machine.get("key"), "committed");
+}
 
 TEST_F(PersistentServer, SingleNodeCommitsAnElectionNoop) {
     start(true);
@@ -408,5 +442,138 @@ TEST_F(PersistentServer, CorruptStateRefusesStartupBeforeListening) {
     EXPECT_EQ(process->wait_for_exit(), 1);
     EXPECT_FALSE(std::filesystem::exists(root / "server.sock"));
 }
+class CommittedCluster : public PersistentServer {
+protected:
+    void SetUp() override {
+        PersistentServer::SetUp();
+        nodes.resize(3);
+        for (int i = 0; i < 3; ++i) {
+            directories.push_back(root / ("node-" + std::to_string(i + 1)));
+            endpoints.push_back("ipc://" + (root / ("node-" + std::to_string(i + 1) + ".sock")).string());
+        }
+        for (int i = 0; i < 3; ++i) start_node(i);
+    }
+    void TearDown() override {
+        nodes.clear();
+        PersistentServer::TearDown();
+    }
+    void start_node(int i) {
+        std::vector<std::string> args{endpoints[i], "--node-id", std::to_string(i + 1),
+            "--data-dir", directories[i].string(), "--heartbeat-interval-ms", "10",
+            "--election-timeout-min-ms", "200", "--election-timeout-max-ms", "400"};
+        for (int j = 0; j < 3; ++j) {
+            if (i != j) args.insert(args.end(), {"--peer", std::to_string(j + 1) + "=" + endpoints[j]});
+        }
+        nodes[i] = std::make_unique<ServerProcess>(std::move(args), root / ("cluster-" + std::to_string(i) + ".log"));
+    }
+    Message command(int i, const std::string& text, int timeout = 3000) {
+        zmq::context_t context{1};
+        zmq::socket_t client{context, zmq::socket_type::req};
+        configure_socket(client);
+        client.set(zmq::sockopt::linger, 0);
+        client.set(zmq::sockopt::rcvtimeo, timeout);
+        client.connect(endpoints[i]);
+        send_message(client, {MessageType::text, 42, text});
+        return receive_message(client);
+    }
+    int find_leader() {
+        for (int attempt = 0; attempt < 40; ++attempt) {
+            for (int i = 0; i < 3; ++i) {
+                if (!nodes[i]) continue;
+                try {
+                    if (command(i, "GET probe", 500).type == MessageType::acknowledgement) return i;
+                } catch (const std::runtime_error&) {}
+            }
+            std::this_thread::sleep_for(20ms);
+        }
+        throw std::runtime_error("Cluster did not elect an available leader");
+    }
+    static std::uint64_t read_index(const std::filesystem::path& path) {
+        std::ifstream input{path, std::ios::binary};
+        std::string bytes(16, '\0');
+        if (!input.read(bytes.data(), bytes.size())) return 0;
+        std::uint64_t value = 0;
+        for (std::size_t i = 8; i < 16; ++i) value = (value << 8) | static_cast<unsigned char>(bytes[i]);
+        return value;
+    }
+    bool wait_for_commit(int i, std::uint64_t index) {
+        for (int attempt = 0; attempt < 300; ++attempt) {
+            if (read_index(directories[i] / "commit.bin") >= index) return true;
+            std::this_thread::sleep_for(10ms);
+        }
+        return false;
+    }
+    std::vector<std::unique_ptr<ServerProcess>> nodes;
+    std::vector<std::filesystem::path> directories;
+    std::vector<std::string> endpoints;
+};
+
+TEST_F(CommittedCluster, CommitsWithOneFollowerDownAndPreservesStateAcrossLeaderChange) {
+    const int original = find_leader();
+    ASSERT_EQ(command(original, "SET key first").payload, "OK");
+    const int follower = (original + 1) % 3;
+    nodes[follower].reset();
+    ASSERT_EQ(command(original, "SET key majority").payload, "OK");
+    const auto committed = read_index(directories[original] / "commit.bin");
+    start_node(follower);
+    ASSERT_TRUE(wait_for_commit(follower, committed));
+    nodes[original].reset();
+    const int successor = find_leader();
+    ASSERT_NE(successor, original);
+    ASSERT_EQ(command(successor, "GET key").payload, "VALUE majority");
+    ASSERT_EQ(command(successor, "SET key successor").payload, "OK");
+    start_node(original);
+    const auto latest = read_index(directories[successor] / "commit.bin");
+    for (int i = 0; i < 3; ++i) ASSERT_TRUE(wait_for_commit(i, latest));
+    for (auto& node : nodes) node.reset();
+    for (int i = 0; i < 3; ++i) {
+        auto directory = std::make_shared<StorageDirectory>(directories[i]);
+        CommitStorage commit{directory};
+        LogStorage log{directory};
+        KeyValueStateMachine machine;
+        machine.apply_committed(log.load(), commit.load().index);
+        EXPECT_EQ(machine.get("key"), "successor");
+    }
+}
+
+TEST_F(CommittedCluster, IsolatedLeaderCannotReturnSuccessfulWrite) {
+    const int leader = find_leader();
+    ASSERT_EQ(command(leader, "SET key committed").payload, "OK");
+    for (int i = 0; i < 3; ++i) if (i != leader) nodes[i].reset();
+    const auto committed = read_index(directories[leader] / "commit.bin");
+    const auto response = command(leader, "SET key isolated");
+    EXPECT_EQ(response.type, MessageType::error);
+    EXPECT_NE(response.payload.find("outcome unknown"), std::string::npos);
+    EXPECT_EQ(read_index(directories[leader] / "commit.bin"), committed);
+}
+
+TEST_F(CommittedCluster, PendingClientDoesNotBlockHeartbeatAndCannotReceiveOverwrittenCommandsResult) {
+    const int leader = find_leader();
+    for (int i = 0; i < 3; ++i) if (i != leader) nodes[i].reset();
+    zmq::context_t context{1};
+    zmq::socket_t client{context, zmq::socket_type::req};
+    zmq::socket_t contact{context, zmq::socket_type::req};
+    configure_socket(client);
+    configure_socket(contact);
+    client.set(zmq::sockopt::linger, 0);
+    contact.set(zmq::sockopt::linger, 0);
+    client.connect(endpoints[leader]);
+    contact.connect(endpoints[leader]);
+    const auto before = read_index(directories[leader] / "log.bin");
+    const auto term = read_index(directories[leader] / "state.bin");
+    send_message(client, {MessageType::text, 51, "SET key pending"});
+    for (int i = 0; i < 100 && read_index(directories[leader] / "log.bin") == before; ++i) {
+        std::this_thread::sleep_for(10ms);
+    }
+    ASSERT_EQ(read_index(directories[leader] / "log.bin"), before + 1);
+    send_message(contact, make_heartbeat_request(52, {term + 1, 99, before, term, before + 1,
+        {{before + 1, term + 1, "SET key replacement"}}}));
+    ASSERT_TRUE(decode_heartbeat_response(receive_message(contact)).success);
+    const auto response = receive_message(client);
+    EXPECT_EQ(response.id, 51u);
+    EXPECT_EQ(response.type, MessageType::error);
+    EXPECT_NE(response.payload.find("Leadership changed"), std::string::npos);
+}
+
 } // namespace
 } // namespace zmq_template::server

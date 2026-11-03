@@ -10,7 +10,7 @@ int main(int argc, char* argv[]) {
     const bool all = argc >= 2 && std::string(argv[1]) == "--all";
     if ((argc >= 2 && std::string(argv[1]).rfind("--", 0) == 0 && !all)
         || (!all && argc > 3) || (all && argc < 3)) {
-        std::cerr << "Usage: zmq_client [connect_endpoint] [message]\n"
+        std::cerr << "Usage: zmq_client [connect_endpoint] [command]\n"
                   << "       zmq_client --all endpoint [endpoint ...]\n";
         return 2;
     }
@@ -22,7 +22,7 @@ int main(int argc, char* argv[]) {
         } else {
             endpoints.emplace_back(argc >= 2 ? argv[1] : "tcp://127.0.0.1:5555");
         }
-        const std::string message = !all && argc >= 3 ? argv[2] : "ZeroMQ";
+        const std::string message = !all && argc >= 3 ? argv[2] : "SET greeting Hello, ZeroMQ";
         zmq::context_t context{1};
         std::vector<zmq::socket_t> sockets;
         for (const auto& endpoint : endpoints) {
@@ -38,15 +38,22 @@ int main(int argc, char* argv[]) {
             spdlog::debug("Queued request id={} endpoint={} payload_bytes={}",
                           outgoing.id, endpoints[i], outgoing.payload.size());
         }
+        bool failed = false;
         for (std::size_t i = 0; i < sockets.size(); ++i) {
             const auto reply = zmq_template::receive_message(sockets[i]);
-            if (reply.type != zmq_template::MessageType::acknowledgement || reply.id != outgoing.id) {
+            if (reply.id != outgoing.id || (reply.type != zmq_template::MessageType::acknowledgement
+                && reply.type != zmq_template::MessageType::error)) {
                 throw std::runtime_error("Unexpected reply type or message id");
             }
             if (all) std::cout << '[' << endpoints[i] << "] ";
+            if (reply.type == zmq_template::MessageType::error) {
+                std::cout << "Error: ";
+                failed = true;
+            }
             std::cout << reply.payload << '\n';
             spdlog::info("Received reply id={} endpoint={}", reply.id, endpoints[i]);
         }
+        return failed ? 1 : 0;
     } catch (const std::exception& error) {
         spdlog::error("Client error: {}", error.what());
         return 1;

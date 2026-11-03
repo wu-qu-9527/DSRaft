@@ -27,6 +27,14 @@ void request_stop(int) { stop_requested = 1; }
 namespace zmq_template::server {
 
 struct server::Runtime {
+    struct PendingCommand {
+        std::string route;
+        std::uint32_t rpc_id;
+        std::uint64_t index;
+        std::uint64_t term;
+        ElectionTimer::Clock::time_point deadline;
+        std::optional<std::string> result;
+    };
     explicit Runtime(const NodeConfig& config, VoteState& state, Role& role)
         : election_timer(config.election_timeout_min, config.election_timeout_max),
           election(config, state, role), heartbeat_timer(config.heartbeat_interval) {}
@@ -42,6 +50,7 @@ struct server::Runtime {
     std::vector<PeerRpc> peers;
     std::vector<LogEntry> log;
     KeyValueStateMachine machine;
+    std::vector<PendingCommand> pending;
     std::unordered_map<std::uint64_t, LogReplication> replication;
     std::uint32_t next_rpc_id{0};
 };
@@ -68,7 +77,14 @@ void server::persist_commit_and_apply(Runtime& runtime) {
         commit_storage_.save(next);
         persisted_commit_ = next;
     }
-    runtime.machine.apply_committed(runtime.log, vote_state_.commit_index);
+    const auto applied = runtime.machine.apply_committed(runtime.log, vote_state_.commit_index);
+    for (const auto& result : applied) {
+        for (auto& pending : runtime.pending) {
+            if (pending.index == result.index && pending.term == runtime.log[result.index - 1].term) {
+                pending.result = result.result;
+            }
+        }
+    }
 }
 
 void server::advance_commit(Runtime& runtime) {
@@ -78,6 +94,27 @@ void server::advance_commit(Runtime& runtime) {
     vote_state_.commit_index = majority_commit_index(runtime.log, vote_state_.current_term,
         vote_state_.commit_index, std::move(matches));
     persist_commit_and_apply(runtime);
+}
+
+void server::complete_pending(Runtime& runtime) {
+    const auto now = ElectionTimer::Clock::now();
+    auto pending = runtime.pending.begin();
+    while (pending != runtime.pending.end()) {
+        zmq_template::Message response{MessageType::error, pending->rpc_id, {}};
+        if (pending->result) {
+            response.type = MessageType::acknowledgement;
+            response.payload = *pending->result;
+        } else if (role_ != Role::Leader || pending->term != vote_state_.current_term) {
+            response.payload = "Leadership changed; outcome unknown. Retrying may execute the command again.";
+        } else if (now >= pending->deadline) {
+            response.payload = "Commit timed out; outcome unknown. Retrying may execute the command again.";
+        } else {
+            ++pending;
+            continue;
+        }
+        reply(runtime, pending->route, response);
+        pending = runtime.pending.erase(pending);
+    }
 }
 
 int server::wait_util_stop() {
@@ -168,7 +205,27 @@ void server::handle_request(Runtime& runtime) {
             spdlog::debug("Heartbeat received leader={} term={} success={}",
                           request.leader_id, request.term, result.response.success);
         } else if (message.type == zmq_template::MessageType::text) {
-            response = {zmq_template::MessageType::acknowledgement, message.id, "Hello, " + message.payload};
+            if (role_ != Role::Leader || !runtime.leader_active
+                || runtime.heartbeat_term != vote_state_.current_term) {
+                throw std::invalid_argument(vote_state_.leader_id
+                    ? "Not leader; known leader ID=" + std::to_string(*vote_state_.leader_id)
+                    : "Not leader; leader unknown");
+            }
+            KeyValueStateMachine::validate_command(message.payload);
+            if (message.payload.size() > max_payload_size - 72) {
+                throw std::invalid_argument("Command is too large for AppendEntries");
+            }
+            if (runtime.pending.size() >= 1024) throw std::invalid_argument("Too many pending commands");
+            const LogEntry entry{vote_state_.last_log_index + 1, vote_state_.current_term, message.payload};
+            log_storage_.append({entry});
+            runtime.log.push_back(entry);
+            vote_state_.last_log_index = entry.index;
+            vote_state_.last_log_term = entry.term;
+            runtime.pending.push_back({route, message.id, entry.index, entry.term,
+                ElectionTimer::Clock::now() + std::chrono::seconds{2}, std::nullopt});
+            advance_commit(runtime);
+            runtime.heartbeat_timer.restart();
+            return; // The event loop replies after commit/application, timeout, or leadership loss.
         } else {
             throw std::invalid_argument("Unsupported RPC request type");
         }
@@ -339,6 +396,7 @@ int server::run(const NodeConfig& config) {
             tick_leader(*runtime);
             break;
         }
+        complete_pending(*runtime);
     }
     spdlog::info("Server stopped");
     return 0;

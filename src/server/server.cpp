@@ -9,6 +9,7 @@
 #include "server/heartbeat.hpp"
 #include "server/log_replication.hpp"
 #include "server/key_value_state_machine.hpp"
+#include "server/commit_index.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -68,6 +69,15 @@ void server::persist_commit_and_apply(Runtime& runtime) {
         persisted_commit_ = next;
     }
     runtime.machine.apply_committed(runtime.log, vote_state_.commit_index);
+}
+
+void server::advance_commit(Runtime& runtime) {
+    if (role_ != Role::Leader || !runtime.leader_active) return;
+    std::vector<std::uint64_t> matches;
+    for (const auto& peer : runtime.peers) matches.push_back(runtime.replication.at(peer.id()).match_index());
+    vote_state_.commit_index = majority_commit_index(runtime.log, vote_state_.current_term,
+        vote_state_.commit_index, std::move(matches));
+    persist_commit_and_apply(runtime);
 }
 
 int server::wait_util_stop() {
@@ -173,6 +183,7 @@ void server::handle_peer_response(Runtime& runtime, PeerRpc& peer) {
             if (role_ == Role::Leader && request_term == vote_state_.current_term
                 && response.term == vote_state_.current_term && runtime.leader_active) {
                 runtime.replication.at(peer.id()).acknowledge(response.success);
+                advance_commit(runtime);
             }
             spdlog::debug("Heartbeat response peer={} term={} success={}",
                           peer.id(), response.term, response.success);
@@ -247,9 +258,16 @@ void server::tick_leader(Runtime& runtime) {
             peer.cancel();
             runtime.replication[peer.id()].reset(vote_state_.last_log_index);
         }
+        // Persist a current-term no-op before replication; never commit an old term by counting it alone.
+        const LogEntry noop{vote_state_.last_log_index + 1, vote_state_.current_term, {}};
+        log_storage_.append({noop});
+        runtime.log.push_back(noop);
+        vote_state_.last_log_index = noop.index;
+        vote_state_.last_log_term = noop.term;
         runtime.heartbeat_timer.restart();
         runtime.leader_active = true;
         runtime.heartbeat_term = vote_state_.current_term;
+        advance_commit(runtime);
     }
     if (runtime.heartbeat_timer.tick()) {
         for (auto& peer : runtime.peers) {

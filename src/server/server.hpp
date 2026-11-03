@@ -30,6 +30,7 @@ private:
     void start_election(Runtime& runtime);
     void persist_state();
     void persist_commit_and_apply(Runtime& runtime);
+    void advance_commit(Runtime& runtime);
 
     int run(const NodeConfig& config);
 

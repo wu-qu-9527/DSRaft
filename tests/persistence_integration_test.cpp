@@ -105,6 +105,56 @@ protected:
     std::unique_ptr<ServerProcess> process;
 };
 
+TEST_F(PersistentServer, SingleNodeCommitsAnElectionNoop) {
+    start(true);
+    for (int i = 0; i < 200 && !std::filesystem::exists(data_dir / "commit.bin"); ++i) {
+        std::this_thread::sleep_for(10ms);
+    }
+    ASSERT_TRUE(std::filesystem::exists(data_dir / "commit.bin"));
+    process.reset();
+    auto directory = std::make_shared<StorageDirectory>(data_dir);
+    LogStorage log{directory};
+    CommitStorage commit{directory};
+    ASSERT_EQ(log.load().size(), 1u);
+    EXPECT_EQ(log.load()[0].term, 1u);
+    EXPECT_TRUE(log.load()[0].command.empty());
+    EXPECT_EQ(commit.load().index, 1u);
+}
+
+TEST_F(PersistentServer, DoesNotCommitUntilPeerConfirmsCurrentTermNoop) {
+    {
+        auto directory = std::make_shared<StorageDirectory>(data_dir);
+        StateStorage state{directory};
+        LogStorage log{directory};
+        state.save({1, std::nullopt});
+        log.append({{1, 1, "SET key old"}});
+    }
+    zmq::context_t context{1};
+    zmq::socket_t peer{context, zmq::socket_type::rep};
+    configure_socket(peer);
+    peer.set(zmq::sockopt::linger, 0);
+    const auto address = "ipc://" + (root / "commit-peer.sock").string();
+    peer.bind(address);
+    start(true, address);
+    auto incoming = receive_message(peer);
+    ASSERT_EQ(incoming.type, MessageType::request_vote);
+    send_message(peer, make_vote_response(incoming.id, {2, true}));
+    incoming = receive_message(peer);
+    auto request = decode_heartbeat_request(incoming);
+    EXPECT_EQ(request.leader_commit, 0u);
+    ASSERT_EQ(request.entries.size(), 1u);
+    EXPECT_EQ(request.entries.back().term, 2u);
+    EXPECT_TRUE(request.entries.back().command.empty());
+    EXPECT_FALSE(std::filesystem::exists(data_dir / "commit.bin"));
+    send_message(peer, make_heartbeat_response(incoming.id, {2, true}));
+    incoming = receive_message(peer);
+    EXPECT_EQ(decode_heartbeat_request(incoming).leader_commit, 2u);
+    send_message(peer, make_heartbeat_response(incoming.id, {2, true}));
+    process.reset();
+    CommitStorage commit{std::make_shared<StorageDirectory>(data_dir)};
+    EXPECT_EQ(commit.load().index, 2u);
+}
+
 TEST_F(PersistentServer, RestoresCommittedBoundaryAndRejectsConflictingCommittedEntries) {
     start();
     EXPECT_TRUE(decode_heartbeat_response(call(make_heartbeat_request(1,
@@ -220,7 +270,8 @@ TEST_F(PersistentServer, LeaderRetriesAndCopiesMultipleBatchesToDivergentFollowe
     const auto expected = contents(data_dir / "log.bin");
     bool replicated = false;
     for (int i = 0; i < 500; ++i) {
-        if (contents(follower_data / "log.bin") == expected) {
+        const auto copied = contents(follower_data / "log.bin");
+        if (copied.size() > expected.size() && copied.find("command-131") != std::string::npos) {
             replicated = true;
             break;
         }
@@ -230,9 +281,14 @@ TEST_F(PersistentServer, LeaderRetriesAndCopiesMultipleBatchesToDivergentFollowe
     follower.reset();
     LogStorage recovered{follower_data};
     const auto entries = recovered.load();
-    ASSERT_EQ(entries.size(), 131u);
-    EXPECT_EQ(entries[1].term, 2u);
-    EXPECT_EQ(entries.back().command, "command-131");
+    ASSERT_EQ(entries.size(), 132u);
+    EXPECT_EQ(entries[0].command, "prefix");
+    for (std::uint64_t i = 2; i <= 131; ++i) {
+        EXPECT_EQ(entries[i - 1].term, 2u);
+        EXPECT_EQ(entries[i - 1].command, "command-" + std::to_string(i));
+    }
+    EXPECT_TRUE(entries.back().command.empty());
+    EXPECT_GE(entries.back().term, 4u);
 }
 
 TEST_F(PersistentServer, RecoversLogMetadataBeforeVoting) {

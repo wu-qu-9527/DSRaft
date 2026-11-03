@@ -2,10 +2,10 @@
 
 ## Project Structure & Module Organization
 
-This C++17 project implements ZeroMQ request/reply messaging, Raft elections and heartbeats, and durable term/vote and log storage. AppendEntries replicates stored logs; majority commit and state-machine execution are not implemented yet.
+This C++17 Raft project uses ZeroMQ, durable term/vote and log storage, current-term majority commits, and a deterministic key-value state machine. Client deduplication is pending.
 
 - `src/common/`: message encoding, socket helpers, and logging.
-- `src/server/`: node configuration, election logic, and server lifecycle; `rpc/` contains peer RPCs and `storage/` contains persistence.
+- `src/server/`: configuration, elections, replication, commit rules, and the key-value state machine; `rpc/` contains peer RPCs and `storage/` contains state, log, and commit persistence.
 - `src/client/`: business request client.
 - `tests/`: unit and process-level integration tests.
 - `cmake/`: dependency and testing setup; `scripts/start_demo.sh`: tmux cluster demo.
@@ -21,7 +21,7 @@ cmake --build --preset debug --parallel    # Build applications and tests
 ctest --preset debug                      # Run GoogleTest cases through CTest
 ./build/debug/zmq_server --help            # Inspect server options
 ./build/debug/zmq_server                   # Start a local server
-./build/debug/zmq_client                   # Send a request from another terminal
+./build/debug/zmq_client                   # Submit default SET to the elected leader
 ./scripts/start_demo.sh --no-build         # Launch the default three-node tmux demo
 ```
 

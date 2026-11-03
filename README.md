@@ -1,6 +1,6 @@
 # CMake + Ninja + C++ + ZeroMQ 项目模板
 
-C++17，使用 cppzmq（ZeroMQ 官方 C++ 绑定），提供基本 REQ/REP 请求响应通信示例。
+C++17，使用 cppzmq（ZeroMQ 官方 C++ 绑定），实现固定成员 Raft 日志复制、多数提交和确定性键值状态机。
 
 ## 环境
 
@@ -29,21 +29,22 @@ Release 构建将上述 `debug` 替换为 `release`。构建目录分别为 `bui
 # 终端一：持续运行，Ctrl+C 停止
 ./build/debug/zmq_server
 
-# 终端二：预期输出 Hello, ZeroMQ
+# 终端二：等待单节点选出 Leader 后运行，预期输出 OK
 ./build/debug/zmq_client
 ```
 
-自定义地址和消息：
+自定义地址和键值命令：
 
 ```sh
 ./build/debug/zmq_server tcp://127.0.0.1:6000
-./build/debug/zmq_client tcp://127.0.0.1:6000 "C++"
+./build/debug/zmq_client tcp://127.0.0.1:6000 "SET language C++"
+./build/debug/zmq_client tcp://127.0.0.1:6000 "GET language"
 ```
 
-Windows 可执行文件带 `.exe` 后缀。示例默认只监听本机，客户端收发超时为 5 秒，出错返回非零退出码。
-客户端使用 `zmq::socket_type::req` 并 connect，服务端使用 `zmq::socket_type::rep` 并 bind。
-每个 REQ socket 严格按“发送请求 → 接收响应”交替执行；REP 按“接收请求 → 发送响应”交替执行。
-服务端循环接收请求并回复；客户端请求超时后应重建 REQ socket，再发送新的请求。
+当前服务端存储要求 Linux/POSIX。示例默认只监听本机，客户端收发超时为 5 秒，出错返回非零退出码。
+客户端使用 `zmq::socket_type::req` 并 connect，服务端使用 `zmq::socket_type::router` 并 bind。
+每个 REQ socket 严格按“发送请求 → 接收响应”交替执行；ROUTER 保存路由信封，允许延后回复且继续接收其他请求。
+客户端请求超时后应重建 REQ socket；超时不能证明命令没有提交，重试仍可能重复执行。
 服务端通过 `zmq::poll` 等待消息，收发不阻塞事件循环；关闭 socket 时最多等待 1 秒发送队列排空。
 同一 context 可以跨线程共享，同一 socket 应固定由一个线程使用。
 
@@ -76,11 +77,11 @@ ssh -t user@host 'cd /path/to/Raft && ./scripts/start_demo.sh'
 
 节点 ID 自动分配为 `1..K`，端口为 `base-port` 到 `base-port+K-1`。
 一个 client 进程通过 K 个独立 REQ socket 分别连接 K 个 server，各发送一次请求并打印响应，每个 socket 只有一个待响应请求。
-server 持续运行并显示选举超时日志；client 完成请求后退出，窗格保留输出并进入 shell。
+server 持续运行并显示选举超时日志；client 向各节点提交默认 SET 命令后退出；Leader 返回 OK，Follower 返回 Leader 信息，窗格保留输出并进入 shell。
 K 个 server 配置为同一固定成员集群，每个节点自动配置其余 `K-1` 个 peers，
 节点之间自动发起投票 RPC 并统计多数票；client 仅发送普通业务请求。
 Leader 当选后立即发送心跳，之后每 50ms 发送一次；Follower 在持续收到有效心跳时不会发起选举。
-当前已持久化任期、投票及日志条目，已支持日志条目复制，尚未实现多数提交。
+当前已支持任期/投票/日志/提交位置持久恢复、日志复制、多数提交和键值命令应用。
 
 ```sh
 # 已构建时跳过构建
@@ -134,7 +135,7 @@ src/
   server/server.cpp            # 服务初始化、RPC 事件循环与停止处理
   server/state.hpp             # 角色类型、任期、已投票节点和日志末尾元数据
   server/vote_handler.hpp      # voteFor：接收 RequestVote 并返回结果
-  server/rpc/peer_rpc.hpp          # requestVoteFor：节点间异步 REQ/REP 调用
+  server/rpc/peer_rpc.hpp          # requestVoteFor：节点间异步 REQ/ROUTER 调用
   server/node_config.hpp       # 节点 ID 和固定 peer 配置数据结构
   server/config_parser.hpp     # 命令行配置解析接口
   server/config_parser.cpp     # 命令行配置解析与校验
@@ -143,7 +144,10 @@ src/
   server/rpc/heartbeat_rpc.hpp     # AppendEntries 日志复制与空心跳请求/响应
   server/rpc/heartbeat_rpc.cpp     # 心跳 RPC 编解码
   server/election.hpp          # 任期、自投、计票和 Leader 转换
-  server/heartbeat.hpp         # 心跳定时器与接收处理
+  server/heartbeat.hpp         # 心跳定时器与日志匹配处理
+  server/commit_index.hpp      # 当前任期多数提交规则
+  server/key_value_state_machine.hpp # 顺序应用的键值状态机
+  server/storage/commit_storage.hpp  # 提交位置的持久化与恢复
   server/election_timer.hpp    # 随机选举定时器，使用单调时钟
   client/main.cpp              # REQ 客户端
   common/message.hpp           # 双方共用的 Message 结构体、类型和协议声明
@@ -247,10 +251,10 @@ spdlog::error("Connection failed: {}", error.what());
 - `Candidate` 再次超时：保持 `Candidate`，重新随机计时并记录日志。
 - `Leader`：不触发选举超时动作。
 
-选举定时器和 REQ/REP 消息由同一线程处理。`zmq::poll` 最长等待到下一次到期时间，
+选举定时器和 REQ/ROUTER 消息由同一线程处理。`zmq::poll` 最长等待到下一次到期时间，
 并以最多 100ms 的间隔检查退出信号；server 可用 `Ctrl+C` 或 SIGTERM 停止。
-普通客户端请求不重置选举定时器。后续实现有效的 Leader 联系或授予投票时，
-可调用 `ElectionTimer::reset()` 重置；开始新一轮选举时也应重新随机计时。
+普通客户端请求不重置选举定时器。有效的 Leader 联系、授予投票和新一轮选举会调用
+`ElectionTimer::reset()` 重置并重新随机计时。
 
 定时器到期后启动新一轮选举：递增任期、投自己一票、向 peers 请求投票。收到多数票后切换为 Leader。
 收到更高任期的请求或响应时更新任期并退回 Follower。
@@ -258,7 +262,7 @@ spdlog::error("Connection failed: {}", error.what());
 
 ## RequestVote RPC 接口
 
-服务端在原有 REP 端口接收投票请求，外层 `Message.id` 用于匹配请求与响应。
+服务端在共用的 ROUTER 端口接收投票请求，外层 `Message.id` 用于匹配请求与响应。
 `server/rpc/vote_rpc.hpp` 提供共用结构体及编解码接口：
 
 ```cpp
@@ -313,7 +317,7 @@ RPC 超时为 100ms，失败后释放连接，下一轮重新建立，避免 REQ
 
 目前已支持任期、`voted_for` 和日志条目的持久化与启动恢复，最后日志索引和任期从真实日志恢复。
 已支持携带日志的 AppendEntries，空条目列表维持心跳；失去心跳后 Follower 会重新选举。
-后续仍需补充多数提交和状态机执行。
+已支持当前任期多数提交、提交位置恢复和键值状态机执行。
 投票规则参考 [Raft 论文 Figure 2](https://raft.github.io/raft.pdf)。
 
 ## 日志条目
@@ -327,11 +331,11 @@ RPC 超时为 100ms，失败后释放连接，下一轮重新建立，避免 REQ
 | `command` | `std::string` | 状态机命令的原始字节，可包含 NUL，不限定为文本 |
 
 索引 0、任期 0 表示空日志边界，默认构造值不代表一条有效业务日志。
-条目已接入本地日志存储、启动恢复和 AppendEntries 编解码，尚未接入状态机执行。
+条目已接入本地日志存储、启动恢复、AppendEntries 编解码及提交后的状态机执行。
 
 ## Leader 心跳
 
-Leader 当选后立即通过节点间 REQ/REP 发送 AppendEntries，之后默认每 **50ms** 发送一轮。
+Leader 当选后立即通过节点间 REQ/ROUTER 发送 AppendEntries，之后默认每 **50ms** 发送一轮。
 心跳间隔小于随机选举超时（150–300ms），使用同一事件循环和单调时钟调度。
 每个 peer 最多一个待响应 RPC，尚未完成的调用不会被下一轮心跳覆盖；100ms 超时后关闭连接，再尝试发送。
 
@@ -353,8 +357,8 @@ Leader 为每个 Follower 维护 `next_index` 和 `match_index`。拒绝时回�
 `1 MiB - 48 - 24` 字节；超大本地条目无法发送，节点进入 Leader 发送流程时会报错退出。
 只使用当前领导任期的响应更新进度；更高任期响应使 Leader 退位并持久化新任期。
 
-当前业务请求仍直接返回示例响应，不自动追加日志。多数提交、提交索引的持久恢复和状态机应用尚未实现。
-冲突保护使用当前进程已知的 `commit_index`，不代表已完成跨重启的提交安全闭环。
+业务命令通过日志复制、多数提交和状态机应用后回复。提交索引由 `CommitStorage` 持久化，
+重启后恢复已提交边界，继续保护已提交前缀不被冲突日志覆盖。
 
 ```sh
 # 查看心跳发送、接收及响应日志
@@ -438,7 +442,7 @@ auto directory = std::make_shared<StorageDirectory>("./data/node-1");
 StateStorage state{directory};
 LogStorage log{directory};
 state.save({1, std::nullopt});
-log.append({{1, 1, "set key value"}, {2, 1, "delete key"}});
+log.append({{1, 1, "SET key value"}, {2, 1, "DEL key"}});
 auto entries = log.load();
 log.truncate_suffix(2); // 删除索引 >= 2 的后缀，保留索引 1
 ```
@@ -452,8 +456,7 @@ log.truncate_suffix(2); // 删除索引 >= 2 的后缀，保留索引 1
 写入成本随日志总大小增长。文件头为 8 字节 `RAFTLG01` 和 8 字节条目数，每条记录包含
 8 字节索引、8 字节任期、8 字节命令长度及命令字节；文件末尾是覆盖前面全部内容的 8 字节 FNV-1a 校验和。
 整数均使用大端编码。缺少 `log.bin` 表示空日志；已有日志损坏、索引不连续或日志任期超过当前任期时拒绝启动。
-启动恢复不代表日志已提交；提交位置恢复和状态机重放仍属于后续工作。
-业务请求目前仍直接返回示例响应，不会自动追加日志；多数提交尚未实现。
+日志落盘不代表已提交；启动时根据独立的提交检查点重放已提交前缀，未提交后缀保留但不应用。
 
 ## 提交位置与状态机恢复
 

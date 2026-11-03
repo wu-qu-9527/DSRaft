@@ -4,6 +4,7 @@
 #include "server/state.hpp"
 #include "server/storage/persistent_state.hpp"
 #include "server/storage/log_storage.hpp"
+#include "server/storage/commit_storage.hpp"
 
 #include <memory>
 
@@ -28,6 +29,7 @@ private:
     void tick_leader(Runtime& runtime);
     void start_election(Runtime& runtime);
     void persist_state();
+    void persist_commit_and_apply(Runtime& runtime);
 
     int run(const NodeConfig& config);
 
@@ -37,6 +39,8 @@ private:
     std::shared_ptr<StorageDirectory> storage_directory_;
     StateStorage state_storage_;
     LogStorage log_storage_;
+    CommitStorage commit_storage_;
+    PersistentCommit persisted_commit_;
     PersistentState persisted_state_;
 };
 

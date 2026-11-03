@@ -8,6 +8,7 @@
 #include "server/rpc/peer_rpc.hpp"
 #include "server/heartbeat.hpp"
 #include "server/log_replication.hpp"
+#include "server/key_value_state_machine.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -39,6 +40,7 @@ struct server::Runtime {
     std::uint64_t heartbeat_term{0};
     std::vector<PeerRpc> peers;
     std::vector<LogEntry> log;
+    KeyValueStateMachine machine;
     std::unordered_map<std::uint64_t, LogReplication> replication;
     std::uint32_t next_rpc_id{0};
 };
@@ -49,7 +51,7 @@ server::server(NodeConfig config)
           ? std::filesystem::read_symlink("/proc/self/exe").parent_path()
               / "data" / ("node-" + std::to_string(config_.id))
           : config_.data_dir)),
-      state_storage_(storage_directory_), log_storage_(storage_directory_) {}
+      state_storage_(storage_directory_), log_storage_(storage_directory_), commit_storage_(storage_directory_) {}
 
 void server::persist_state() {
     const PersistentState next{vote_state_.current_term, vote_state_.voted_for};
@@ -57,6 +59,15 @@ void server::persist_state() {
         && next.voted_for == persisted_state_.voted_for) return;
     state_storage_.save(next);
     persisted_state_ = next;
+}
+
+void server::persist_commit_and_apply(Runtime& runtime) {
+    if (vote_state_.commit_index > persisted_commit_.index) {
+        const PersistentCommit next{vote_state_.commit_index, runtime.log.at(vote_state_.commit_index - 1).term};
+        commit_storage_.save(next);
+        persisted_commit_ = next;
+    }
+    runtime.machine.apply_committed(runtime.log, vote_state_.commit_index);
 }
 
 int server::wait_util_stop() {
@@ -87,6 +98,13 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
                  vote_state_.current_term, vote_state_.voted_for.value_or(0));
     auto runtime = std::make_unique<Runtime>(config, vote_state_, role_);
     runtime->log = std::move(log);
+    persisted_commit_ = commit_storage_.load();
+    if (persisted_commit_.index > runtime->log.size()
+        || (persisted_commit_.index != 0 && runtime->log[persisted_commit_.index - 1].term != persisted_commit_.term)) {
+        throw StorageError("Committed checkpoint does not match the persistent log");
+    }
+    vote_state_.commit_index = persisted_commit_.index;
+    runtime->machine.apply_committed(runtime->log, vote_state_.commit_index);
     zmq_template::configure_socket(runtime->socket);
     // Poll owns the wait; a slow/disconnected peer must not block elections.
     runtime->socket.set(zmq::sockopt::rcvtimeo, 0);
@@ -124,6 +142,7 @@ void server::handle_request(Runtime& runtime) {
                 const auto first = runtime.log.begin() + static_cast<std::size_t>(*result.changed_from - 1);
                 log_storage_.replace_suffix(*result.changed_from, {first, runtime.log.end()});
             }
+            persist_commit_and_apply(runtime);
             response = zmq_template::make_heartbeat_response(message.id, result.response);
             spdlog::debug("Heartbeat received leader={} term={} success={}",
                           request.leader_id, request.term, result.response.success);

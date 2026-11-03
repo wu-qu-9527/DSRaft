@@ -28,6 +28,7 @@ add_library(zmq_server_core
     src/server/server.cpp
     src/server/key_value_state_machine.cpp
     src/server/storage/persistent_state.cpp
+    src/server/storage/commit_storage.cpp
     src/server/storage/log_storage.cpp
     src/server/storage/storage_directory.cpp
     src/server/config_parser.cpp
@@ -65,6 +66,7 @@ if(BUILD_TESTING)
         tests/node_election_test.cpp
         tests/heartbeat_test.cpp
         tests/commit_index_test.cpp
+        tests/commit_storage_test.cpp
         tests/key_value_state_machine_test.cpp)
     target_link_libraries(zmq_tests PRIVATE
         zmq_template::server_core GTest::gtest_main Threads::Threads)

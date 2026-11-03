@@ -3,6 +3,7 @@
 #include "server/rpc/vote_rpc.hpp"
 #include "server/storage/persistent_state.hpp"
 #include "server/storage/log_storage.hpp"
+#include "server/storage/commit_storage.hpp"
 
 #include <gtest/gtest.h>
 
@@ -103,6 +104,44 @@ protected:
     std::string endpoint;
     std::unique_ptr<ServerProcess> process;
 };
+
+TEST_F(PersistentServer, RestoresCommittedBoundaryAndRejectsConflictingCommittedEntries) {
+    start();
+    EXPECT_TRUE(decode_heartbeat_response(call(make_heartbeat_request(1,
+        {5, 2, 0, 0, 1, {{1, 4, "SET key committed"}, {2, 4, "SET key uncommitted"}}}))).success);
+    start();
+    EXPECT_FALSE(decode_heartbeat_response(call(make_heartbeat_request(2,
+        {6, 2, 0, 0, 1, {{1, 6, "SET key overwritten"}}}))).success);
+    process.reset();
+    auto directory = std::make_shared<StorageDirectory>(data_dir);
+    CommitStorage commit{directory};
+    LogStorage log{directory};
+    EXPECT_EQ(commit.load().index, 1u);
+    EXPECT_EQ(log.load()[0].command, "SET key committed");
+}
+
+TEST_F(PersistentServer, CommitPersistenceFailureDoesNotAcknowledgeSuccess) {
+    start();
+    EXPECT_TRUE(decode_heartbeat_response(call(make_heartbeat_request(1,
+        {5, 2, 0, 0, 0, {{1, 4, "SET key value"}}}))).success);
+    std::filesystem::create_directory(data_dir / "commit.tmp");
+    EXPECT_THROW(call(make_heartbeat_request(2, {5, 2, 1, 4, 1})), std::runtime_error);
+    EXPECT_EQ(process->wait_for_exit(), 1);
+    CommitStorage commit{std::make_shared<StorageDirectory>(data_dir)};
+    EXPECT_EQ(commit.load().index, 0u);
+}
+
+TEST_F(PersistentServer, CheckpointBeyondLogRefusesStartup) {
+    {
+        auto directory = std::make_shared<StorageDirectory>(data_dir);
+        StateStorage state{directory};
+        CommitStorage commit{directory};
+        state.save({3, std::nullopt});
+        commit.save({1, 3});
+    }
+    start();
+    EXPECT_EQ(process->wait_for_exit(), 1);
+}
 
 TEST_F(PersistentServer, AppendEntriesRepairsConflictAndSurvivesAbruptRestart) {
     {

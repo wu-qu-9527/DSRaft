@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This C++17 project implements ZeroMQ request/reply messaging, Raft elections and heartbeats, and durable term/vote and log storage. Log replication is not implemented yet.
+This C++17 project implements ZeroMQ request/reply messaging, Raft elections and heartbeats, and durable term/vote and log storage. AppendEntries replicates stored logs; majority commit and state-machine execution are not implemented yet.
 
 - `src/common/`: message encoding, socket helpers, and logging.
 - `src/server/`: node configuration, election logic, and server lifecycle; `rpc/` contains peer RPCs and `storage/` contains persistence.
@@ -37,7 +37,7 @@ Use GoogleTest with `TEST(Suite, Behavior)` or `TEST_F(Fixture, Behavior)` in `t
 
 ## Commit & Pull Request Guidelines
 
-Follow existing commit subjects: `feat:`, `fix:`, `refactor:`, or `docs:` followed by a concise imperative description. Keep commits focused. PR descriptions should explain the resulting behavior, relevant issues, and validation commands/results. Update documentation when CLI options, protocol behavior, or storage paths change.
+Follow existing commit subjects: `feat:`, `fix:`, `refactor:`, or `docs:` followed by a concise Chinese description. Split changes into focused commits by feature or concern. PR descriptions should explain the resulting behavior, relevant issues, and validation commands/results. Update documentation when CLI options, protocol behavior, or storage paths change.
 
 ## Runtime Data
 

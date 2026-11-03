@@ -33,7 +33,7 @@ struct server::Runtime {
 
     // Keep context before sockets so it is destroyed after all connections.
     zmq::context_t context{1};
-    zmq::socket_t socket{context, zmq::socket_type::rep};
+    zmq::socket_t socket{context, zmq::socket_type::router};
     ElectionTimer election_timer;
     Election election;
     HeartbeatTimer heartbeat_timer;
@@ -119,6 +119,7 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     // Poll owns the wait; a slow/disconnected peer must not block elections.
     runtime->socket.set(zmq::sockopt::rcvtimeo, 0);
     runtime->socket.set(zmq::sockopt::sndtimeo, 0);
+    runtime->socket.set(zmq::sockopt::router_mandatory, 1);
     runtime->socket.bind(config.endpoint);
     std::signal(SIGINT, request_stop);
     std::signal(SIGTERM, request_stop);
@@ -132,10 +133,20 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     return runtime;
 }
 
+void server::reply(Runtime& runtime, const std::string& route, const zmq_template::Message& message) {
+    try {
+        zmq_template::send_routed_message(runtime.socket, route, message);
+    } catch (const std::exception& error) {
+        // The durable result survives a disconnected client; a failed delivery must not stop Raft.
+        spdlog::warn("Reply delivery failed id={}: {}", message.id, error.what());
+    }
+}
+
 void server::handle_request(Runtime& runtime) {
+    std::string route;
     zmq_template::Message response;
     try {
-        const auto message = zmq_template::receive_message(runtime.socket);
+        const auto message = zmq_template::receive_routed_message(runtime.socket, route);
         response.id = message.id;
         if (message.type == zmq_template::MessageType::request_vote) {
             const auto request = zmq_template::decode_vote_request(message);
@@ -166,7 +177,7 @@ void server::handle_request(Runtime& runtime) {
         response.payload = error.what();
         spdlog::warn("Rejected invalid request: {}", error.what());
     }
-    zmq_template::send_message(runtime.socket, response);
+    reply(runtime, route, response);
     spdlog::debug("Reply sent for request id={}", response.id);
 }
 

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "server/node_config.hpp"
+#include "common/message.hpp"
 #include "server/state.hpp"
 #include "server/storage/persistent_state.hpp"
 #include "server/storage/log_storage.hpp"
@@ -22,6 +23,7 @@ private:
     struct Runtime;
     std::unique_ptr<Runtime> initialize(const NodeConfig& config);
     void handle_request(Runtime& runtime);
+    void reply(Runtime& runtime, const std::string& route, const zmq_template::Message& message);
     void handle_peer_response(Runtime& runtime, PeerRpc& peer);
     void process_peer_timeouts(Runtime& runtime);
     void tick_follower(Runtime& runtime);

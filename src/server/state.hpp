@@ -11,7 +11,7 @@ enum class Role {
     Leader,
 };
 
-// The server persists term and voted_for before protocol output; log metadata is still in-memory.
+// Term and vote are persisted before protocol output; last-log metadata is recovered from stored entries.
 struct VoteState {
     std::uint64_t current_term{0};
     std::optional<std::uint64_t> voted_for;

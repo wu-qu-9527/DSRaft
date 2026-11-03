@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-This C++17 project implements ZeroMQ request/reply messaging and Raft elections, heartbeats, and durable term/vote state. Log replication is not implemented yet.
+This C++17 project implements ZeroMQ request/reply messaging, Raft elections and heartbeats, and durable term/vote and log storage. Log replication is not implemented yet.
 
 - `src/common/`: message encoding, socket helpers, and logging.
 - `src/server/`: node configuration, election logic, and server lifecycle; `rpc/` contains peer RPCs and `storage/` contains persistence.

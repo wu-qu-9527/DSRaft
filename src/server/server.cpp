@@ -41,16 +41,17 @@ struct server::Runtime {
 
 server::server(NodeConfig config)
     : config_(std::move(config)),
-      storage_(config_.data_dir.empty()
+      storage_directory_(std::make_shared<StorageDirectory>(config_.data_dir.empty()
           ? std::filesystem::read_symlink("/proc/self/exe").parent_path()
               / "data" / ("node-" + std::to_string(config_.id))
-          : config_.data_dir) {}
+          : config_.data_dir)),
+      state_storage_(storage_directory_), log_storage_(storage_directory_) {}
 
 void server::persist_state() {
     const PersistentState next{vote_state_.current_term, vote_state_.voted_for};
     if (next.current_term == persisted_state_.current_term
         && next.voted_for == persisted_state_.voted_for) return;
-    storage_.save(next);
+    state_storage_.save(next);
     persisted_state_ = next;
 }
 
@@ -65,10 +66,18 @@ int server::wait_util_stop() {
 
 std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     stop_requested = 0;
-    persisted_state_ = storage_.load();
+    persisted_state_ = state_storage_.load();
     vote_state_ = {};
     vote_state_.current_term = persisted_state_.current_term;
     vote_state_.voted_for = persisted_state_.voted_for;
+    const auto log = log_storage_.load();
+    if (!log.empty()) {
+        vote_state_.last_log_index = log.back().index;
+        vote_state_.last_log_term = log.back().term;
+        if (vote_state_.last_log_term > vote_state_.current_term) {
+            throw StorageError("Persistent log term exceeds current term");
+        }
+    }
     role_ = Role::Follower;
     spdlog::info("Recovered persistent state term={} voted_for={}",
                  vote_state_.current_term, vote_state_.voted_for.value_or(0));

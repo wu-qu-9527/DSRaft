@@ -2,6 +2,7 @@
 #include "server/rpc/heartbeat_rpc.hpp"
 #include "server/rpc/vote_rpc.hpp"
 #include "server/storage/persistent_state.hpp"
+#include "server/storage/log_storage.hpp"
 
 #include <gtest/gtest.h>
 
@@ -101,6 +102,44 @@ protected:
     std::string endpoint;
     std::unique_ptr<ServerProcess> process;
 };
+
+TEST_F(PersistentServer, RecoversLogMetadataBeforeVoting) {
+    {
+        auto directory = std::make_shared<StorageDirectory>(data_dir);
+        StateStorage storage{directory};
+        LogStorage log{directory};
+        storage.save({5, std::nullopt});
+        log.append({{1, 3, "first"}, {2, 5, "second"}});
+    }
+    start();
+    EXPECT_FALSE(decode_vote_response(call(make_vote_request(1, {6, 2, 1, 5}))).vote_granted);
+    EXPECT_TRUE(decode_vote_response(call(make_vote_request(2, {6, 2, 2, 5}))).vote_granted);
+}
+
+TEST_F(PersistentServer, CorruptLogRefusesStartupBeforeListening) {
+    {
+        auto directory = std::make_shared<StorageDirectory>(data_dir);
+        StateStorage storage{directory};
+        LogStorage log{directory};
+        storage.save({5, std::nullopt});
+        log.append({{1, 5, "command"}});
+    }
+    std::ofstream{data_dir / "log.bin", std::ios::binary | std::ios::trunc} << "partial";
+    start();
+    EXPECT_EQ(process->wait_for_exit(), 1);
+}
+
+TEST_F(PersistentServer, LogTermBeyondPersistentCurrentTermRefusesStartup) {
+    {
+        auto directory = std::make_shared<StorageDirectory>(data_dir);
+        StateStorage storage{directory};
+        LogStorage log{directory};
+        storage.save({4, std::nullopt});
+        log.append({{1, 5, "command"}});
+    }
+    start();
+    EXPECT_EQ(process->wait_for_exit(), 1);
+}
 
 TEST_F(PersistentServer, VoteAndHigherHeartbeatTermSurviveAbruptRestart) {
     start();

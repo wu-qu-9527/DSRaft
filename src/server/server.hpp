@@ -3,6 +3,7 @@
 #include "server/node_config.hpp"
 #include "server/state.hpp"
 #include "server/storage/persistent_state.hpp"
+#include "server/storage/log_storage.hpp"
 
 #include <memory>
 
@@ -33,7 +34,9 @@ private:
     Role role_{Role::Follower};
     NodeConfig config_;
     VoteState vote_state_;
-    StateStorage storage_;
+    std::shared_ptr<StorageDirectory> storage_directory_;
+    StateStorage state_storage_;
+    LogStorage log_storage_;
     PersistentState persisted_state_;
 };
 

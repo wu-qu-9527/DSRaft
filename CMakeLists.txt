@@ -62,7 +62,8 @@ if(BUILD_TESTING)
         tests/election_timer_test.cpp
         tests/vote_rpc_test.cpp
         tests/node_election_test.cpp
-        tests/heartbeat_test.cpp)
+        tests/heartbeat_test.cpp
+        tests/commit_index_test.cpp)
     target_link_libraries(zmq_tests PRIVATE
         zmq_template::server_core GTest::gtest_main Threads::Threads)
     add_dependencies(zmq_tests zmq_server)

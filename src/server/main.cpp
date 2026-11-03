@@ -12,7 +12,7 @@ int main(int argc, char* argv[]) {
     if (argc == 2 && std::string(argv[1]) == "--help") {
         std::cout << "Usage: zmq_server [bind_endpoint] [options]\n"
                   << "  --node-id ID                    Positive node ID (default: 1)\n"
-                  << "  --data-dir PATH                 State directory (default: data/node-<id>)\n"
+                  << "  --data-dir PATH                 State directory (default: <exe-dir>/data/node-<id>)\n"
                   << "  --peer ID=endpoint              Peer address; may be repeated\n"
                   << "  --heartbeat-interval-ms MS      Heartbeat send interval (default: 50)\n"
                   << "  --heartbeat-timeout-ms MS       Heartbeat RPC timeout (default: 100)\n"

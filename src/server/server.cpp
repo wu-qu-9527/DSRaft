@@ -42,7 +42,8 @@ struct server::Runtime {
 server::server(NodeConfig config)
     : config_(std::move(config)),
       storage_(config_.data_dir.empty()
-          ? std::filesystem::path{"data"} / ("node-" + std::to_string(config_.id))
+          ? std::filesystem::read_symlink("/proc/self/exe").parent_path()
+              / "data" / ("node-" + std::to_string(config_.id))
           : config_.data_dir) {}
 
 void server::persist_state() {

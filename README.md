@@ -380,9 +380,13 @@ SPDLOG_LEVEL=debug ./scripts/start_demo.sh --nodes 3 --no-build
 ./build/debug/zmq_server tcp://127.0.0.1:5555 --node-id 1 --data-dir ./data/node-1
 ```
 
-不指定 `--data-dir` 时，默认目录为工作目录下的 `data/node-<id>`。每个节点应使用独立的数据目录，
+不指定 `--data-dir` 时，通过 `/proc/self/exe` 定位可执行文件，默认目录为可执行文件所在目录下的
+`data/node-<id>`，不受启动时工作目录影响。例如，运行 `build/debug/zmq_server` 时默认使用
+`build/debug/data/node-<id>`。显式指定的相对 `--data-dir` 路径仍相对于工作目录。
+每个节点应使用独立的数据目录，
 重启时复用原目录；目录被独占锁定，两个服务进程不能同时使用同一目录。
-默认的 `/data/` 已加入 Git 忽略规则，自定义目录请自行选择适当位置。
+原工作目录下的数据不会自动迁移；升级后请将原数据移至新目录，或通过 `--data-dir` 指定原目录。
+`/build/` 和 `/data/` 已加入 Git 忽略规则，自定义目录请自行选择适当位置。
 
 目录中的文件：
 

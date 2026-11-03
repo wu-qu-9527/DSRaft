@@ -48,7 +48,8 @@ server::server(NodeConfig config)
 
 void server::persist_state() {
     const PersistentState next{vote_state_.current_term, vote_state_.voted_for};
-    if (next.current_term == persisted_state_.current_term && next.voted_for == persisted_state_.voted_for) return;
+    if (next.current_term == persisted_state_.current_term
+        && next.voted_for == persisted_state_.voted_for) return;
     storage_.save(next);
     persisted_state_ = next;
 }
@@ -80,7 +81,8 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     std::signal(SIGINT, request_stop);
     std::signal(SIGTERM, request_stop);
     for (const auto& peer : config.peers) runtime->peers.emplace_back(runtime->context, peer, config.heartbeat_timeout);
-    spdlog::info("Listening on {} node={} role={} election_timeout={}ms election_range=[{},{}]ms heartbeat_interval={}ms heartbeat_timeout={}ms",
+    spdlog::info("Listening on {} node={} role={} election_timeout={}ms election_range=[{},{}]ms "
+                 "heartbeat_interval={}ms heartbeat_timeout={}ms",
                  runtime->socket.get(zmq::sockopt::last_endpoint), config.id,
                  to_string(role_), runtime->election_timer.timeout().count(),
                  config.election_timeout_min.count(), config.election_timeout_max.count(),

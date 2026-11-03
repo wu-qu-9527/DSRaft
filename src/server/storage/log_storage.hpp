@@ -22,6 +22,8 @@ public:
     // Remove first_index and all later entries; last_index + 1 is a no-op.
     // The caller must ensure that no committed entries are removed.
     void truncate_suffix(std::uint64_t first_index);
+    // Atomically replace a suffix, so a crash cannot expose truncation without its replacement.
+    void replace_suffix(std::uint64_t first_index, const std::vector<LogEntry>& entries);
 
 private:
     void save(const std::vector<LogEntry>& entries);

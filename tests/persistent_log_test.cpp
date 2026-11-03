@@ -90,6 +90,23 @@ TEST_F(PersistentLogStorage, TruncatesSuffixAndAllowsReplacementAfterRestart) {
     EXPECT_NO_THROW(reopened.append({}));
 }
 
+TEST_F(PersistentLogStorage, ReplacesSuffixAtomicallyAndRejectsInvalidReplacement) {
+    LogStorage log{directory};
+    log.append({{1, 1, "prefix"}, {2, 2, "old"}, {3, 2, "tail"}});
+    EXPECT_THROW(log.replace_suffix(2, {{3, 3, "gap"}}), StorageError);
+    EXPECT_EQ(log.load().size(), 3u);
+    std::filesystem::create_directory(directory / "log.tmp");
+    EXPECT_THROW(log.replace_suffix(2, {{2, 3, "new"}}), StorageError);
+    EXPECT_EQ(log.load().size(), 3u);
+    EXPECT_EQ(log.load()[1].command, "old");
+    std::filesystem::remove(directory / "log.tmp");
+    log.replace_suffix(2, {{2, 3, "new"}});
+    const auto entries = log.load();
+    ASSERT_EQ(entries.size(), 2u);
+    EXPECT_EQ(entries[0].command, "prefix");
+    EXPECT_EQ(entries[1].command, "new");
+}
+
 TEST_F(PersistentLogStorage, InvalidBatchesAndTruncationLeaveOldLogUnchanged) {
     LogStorage storage{directory};
     storage.append({{1, 3, "old"}});

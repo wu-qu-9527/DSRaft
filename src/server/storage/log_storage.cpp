@@ -103,10 +103,22 @@ void LogStorage::append(const std::vector<LogEntry>& entries) {
 }
 
 void LogStorage::truncate_suffix(std::uint64_t first_index) {
+    replace_suffix(first_index, {});
+}
+
+void LogStorage::replace_suffix(std::uint64_t first_index, const std::vector<LogEntry>& entries) {
     auto log = load();
     if (first_index == 0 || first_index - 1 > log.size()) throw StorageError("Invalid log truncation index");
-    if (first_index - 1 == log.size()) return;
+    if (first_index - 1 == log.size() && entries.empty()) return;
     log.resize(static_cast<std::size_t>(first_index - 1));
+    auto previous_index = log.empty() ? 0 : log.back().index;
+    auto previous_term = log.empty() ? 0 : log.back().term;
+    for (const auto& entry : entries) {
+        validate_log_entry(entry, previous_index, previous_term);
+        previous_index = entry.index;
+        previous_term = entry.term;
+    }
+    log.insert(log.end(), entries.begin(), entries.end());
     save(log);
 }
 

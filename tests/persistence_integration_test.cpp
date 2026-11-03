@@ -10,6 +10,7 @@
 #include <csignal>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
 #include <memory>
 #include <string>
 #include <thread>
@@ -102,6 +103,98 @@ protected:
     std::string endpoint;
     std::unique_ptr<ServerProcess> process;
 };
+
+TEST_F(PersistentServer, AppendEntriesRepairsConflictAndSurvivesAbruptRestart) {
+    {
+        auto directory = std::make_shared<StorageDirectory>(data_dir);
+        StateStorage state{directory};
+        LogStorage log{directory};
+        state.save({3, std::nullopt});
+        log.append({{1, 1, "prefix"}, {2, 2, "conflict"}, {3, 2, "old tail"}});
+    }
+    start();
+    const HeartbeatRequest request{5, 2, 1, 1, 0, {{2, 4, std::string{"a\0b", 3}}}};
+    EXPECT_TRUE(decode_heartbeat_response(call(make_heartbeat_request(1, request))).success);
+    // A duplicate requires no disk write, even if the temporary path is unavailable.
+    std::filesystem::create_directory(data_dir / "log.tmp");
+    EXPECT_TRUE(decode_heartbeat_response(call(make_heartbeat_request(2, request))).success);
+    start();
+    EXPECT_FALSE(decode_vote_response(call(make_vote_request(3, {6, 3, 1, 4}))).vote_granted);
+    process.reset();
+    auto directory = std::make_shared<StorageDirectory>(data_dir);
+    StateStorage state{directory};
+    LogStorage log{directory};
+    EXPECT_EQ(state.load().current_term, 6u);
+    const auto entries = log.load();
+    ASSERT_EQ(entries.size(), 2u);
+    EXPECT_EQ(entries[0].command, "prefix");
+    EXPECT_EQ(entries[1].term, 4u);
+    EXPECT_EQ(entries[1].command, (std::string{"a\0b", 3}));
+}
+
+TEST_F(PersistentServer, FailedLogReplacementDoesNotReplySuccessOrLosePreviousLog) {
+    {
+        auto directory = std::make_shared<StorageDirectory>(data_dir);
+        StateStorage state{directory};
+        LogStorage log{directory};
+        state.save({3, std::nullopt});
+        log.append({{1, 2, "old"}});
+    }
+    std::filesystem::create_directory(data_dir / "log.tmp");
+    start();
+    EXPECT_THROW(call(make_heartbeat_request(1, {5, 2, 0, 0, 0, {{1, 4, "new"}}})), std::runtime_error);
+    EXPECT_EQ(process->wait_for_exit(), 1);
+    auto directory = std::make_shared<StorageDirectory>(data_dir);
+    StateStorage state{directory};
+    LogStorage log{directory};
+    EXPECT_EQ(state.load().current_term, 5u);
+    EXPECT_EQ(log.load().back().command, "old");
+}
+
+TEST_F(PersistentServer, LeaderRetriesAndCopiesMultipleBatchesToDivergentFollower) {
+    const auto follower_data = root / "follower";
+    const auto follower_endpoint = "ipc://" + (root / "follower.sock").string();
+    {
+        auto directory = std::make_shared<StorageDirectory>(data_dir);
+        StateStorage state{directory};
+        LogStorage log{directory};
+        state.save({3, std::nullopt});
+        std::vector<LogEntry> entries{{1, 1, "prefix"}};
+        for (std::uint64_t i = 2; i <= 131; ++i) entries.push_back({i, 2, "command-" + std::to_string(i)});
+        log.append(entries);
+    }
+    {
+        auto directory = std::make_shared<StorageDirectory>(follower_data);
+        StateStorage state{directory};
+        LogStorage log{directory};
+        state.save({3, std::nullopt});
+        log.append({{1, 1, "prefix"}, {2, 1, "conflict"}, {3, 1, "old"}});
+    }
+    auto follower = std::make_unique<ServerProcess>(std::vector<std::string>{follower_endpoint,
+        "--node-id", "2", "--data-dir", follower_data.string(),
+        "--election-timeout-min-ms", "60000", "--election-timeout-max-ms", "60000"}, root / "follower.log");
+    start(true, follower_endpoint);
+    const auto contents = [](const std::filesystem::path& path) {
+        std::ifstream file{path, std::ios::binary};
+        return std::string{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
+    };
+    const auto expected = contents(data_dir / "log.bin");
+    bool replicated = false;
+    for (int i = 0; i < 500; ++i) {
+        if (contents(follower_data / "log.bin") == expected) {
+            replicated = true;
+            break;
+        }
+        std::this_thread::sleep_for(10ms);
+    }
+    EXPECT_TRUE(replicated);
+    follower.reset();
+    LogStorage recovered{follower_data};
+    const auto entries = recovered.load();
+    ASSERT_EQ(entries.size(), 131u);
+    EXPECT_EQ(entries[1].term, 2u);
+    EXPECT_EQ(entries.back().command, "command-131");
+}
 
 TEST_F(PersistentServer, RecoversLogMetadataBeforeVoting) {
     {

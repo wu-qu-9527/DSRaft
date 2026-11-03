@@ -2,6 +2,7 @@
 #include "server/heartbeat.hpp"
 #include "server/election.hpp"
 #include "server/rpc/peer_rpc.hpp"
+#include "server/log_replication.hpp"
 
 #include <gtest/gtest.h>
 
@@ -49,11 +50,12 @@ protected:
     ElectionTimer timer{200ms, 200ms, now};
     VoteState state{5, 1, 0, 0};
     Role role{Role::Candidate};
+    std::vector<LogEntry> log;
 };
 
 TEST_F(HeartbeatHandler, CurrentTermLeaderStepsCandidateDownAndResetsTimer) {
-    const auto result = handle_heartbeat({5, 2, 0, 0, 0}, state, role, timer, now + 100ms);
-    EXPECT_TRUE(result.success);
+    const auto result = handle_heartbeat({5, 2, 0, 0, 0}, state, role, timer, log, now + 100ms);
+    EXPECT_TRUE(result.response.success);
     EXPECT_EQ(role, Role::Follower);
     EXPECT_EQ(state.leader_id, 2u);
     EXPECT_EQ(state.voted_for, 1u);
@@ -61,17 +63,17 @@ TEST_F(HeartbeatHandler, CurrentTermLeaderStepsCandidateDownAndResetsTimer) {
 }
 
 TEST_F(HeartbeatHandler, HigherTermUpdatesStateAndClearsVote) {
-    const auto result = handle_heartbeat({6, 2, 0, 0, 0}, state, role, timer, now + 100ms);
-    EXPECT_TRUE(result.success);
-    EXPECT_EQ(result.term, 6u);
+    const auto result = handle_heartbeat({6, 2, 0, 0, 0}, state, role, timer, log, now + 100ms);
+    EXPECT_TRUE(result.response.success);
+    EXPECT_EQ(result.response.term, 6u);
     EXPECT_FALSE(state.voted_for.has_value());
     EXPECT_EQ(role, Role::Follower);
 }
 
 TEST_F(HeartbeatHandler, StaleHeartbeatDoesNotChangeRoleOrResetTimer) {
-    const auto result = handle_heartbeat({4, 2, 0, 0, 0}, state, role, timer, now + 100ms);
-    EXPECT_FALSE(result.success);
-    EXPECT_EQ(result.term, 5u);
+    const auto result = handle_heartbeat({4, 2, 0, 0, 0}, state, role, timer, log, now + 100ms);
+    EXPECT_FALSE(result.response.success);
+    EXPECT_EQ(result.response.term, 5u);
     EXPECT_EQ(role, Role::Candidate);
     EXPECT_FALSE(state.leader_id.has_value());
     EXPECT_EQ(timer.remaining(now + 100ms), 100ms);
@@ -80,8 +82,9 @@ TEST_F(HeartbeatHandler, StaleHeartbeatDoesNotChangeRoleOrResetTimer) {
 TEST_F(HeartbeatHandler, LogMismatchStillResetsElectionTimerButDoesNotCommit) {
     state.last_log_index = 10;
     state.last_log_term = 3;
-    const auto result = handle_heartbeat({5, 2, 10, 2, 10}, state, role, timer, now + 100ms);
-    EXPECT_FALSE(result.success);
+    for (std::uint64_t i = 1; i <= 10; ++i) log.push_back({i, 3, "command"});
+    const auto result = handle_heartbeat({5, 2, 10, 2, 10}, state, role, timer, log, now + 100ms);
+    EXPECT_FALSE(result.response.success);
     EXPECT_EQ(role, Role::Follower);
     EXPECT_EQ(timer.remaining(now + 100ms), 200ms);
     EXPECT_EQ(state.commit_index, 0u);
@@ -90,9 +93,10 @@ TEST_F(HeartbeatHandler, LogMismatchStillResetsElectionTimerButDoesNotCommit) {
 TEST_F(HeartbeatHandler, EmptyAppendEntriesCommitIsBoundedByMatchedIndex) {
     state.last_log_index = 10;
     state.last_log_term = 3;
-    EXPECT_TRUE(handle_heartbeat({5, 2, 10, 3, 20}, state, role, timer, now).success);
+    for (std::uint64_t i = 1; i <= 10; ++i) log.push_back({i, 3, "command"});
+    EXPECT_TRUE(handle_heartbeat({5, 2, 10, 3, 20}, state, role, timer, log, now).response.success);
     EXPECT_EQ(state.commit_index, 10u);
-    handle_heartbeat({5, 2, 10, 3, 1}, state, role, timer, now);
+    handle_heartbeat({5, 2, 10, 3, 1}, state, role, timer, log, now);
     EXPECT_EQ(state.commit_index, 10u);
 }
 
@@ -125,6 +129,92 @@ TEST(HeartbeatRpc, RoundTripsBinaryEntriesAndRejectsMalformedSequences) {
     EXPECT_THROW(make_heartbeat_request(1, {6, 2, 1, 3, 0, {{2, 7, "future term"}}}), std::invalid_argument);
     EXPECT_THROW(make_heartbeat_request(1, {6, 2, 0, 0, 0, {{1, 1, std::string(max_payload_size, 'x')}}}),
                  std::invalid_argument);
+}
+
+TEST_F(HeartbeatHandler, MatchesInteriorPredecessorAndRepairsOnlyConflictingSuffix) {
+    log = {{1, 1, "one"}, {2, 2, "old"}, {3, 2, "old tail"}};
+    state.last_log_index = 3;
+    state.last_log_term = 2;
+    const auto result = handle_heartbeat({5, 2, 1, 1, 10, {{2, 4, "new"}}}, state, role, timer, log, now);
+    EXPECT_TRUE(result.response.success);
+    EXPECT_EQ(result.changed_from, 2u);
+    ASSERT_EQ(log.size(), 2u);
+    EXPECT_EQ(log[0].command, "one");
+    EXPECT_EQ(log[1].command, "new");
+    EXPECT_EQ(state.last_log_index, 2u);
+    EXPECT_EQ(state.last_log_term, 4u);
+    EXPECT_EQ(state.commit_index, 2u);
+}
+
+TEST_F(HeartbeatHandler, DuplicateAndShorterRequestsPreserveMatchingExtraSuffix) {
+    log = {{1, 1, "one"}, {2, 2, "two"}, {3, 3, "three"}};
+    const HeartbeatRequest request{5, 2, 1, 1, 10, {{2, 2, "two"}}};
+    for (int i = 0; i < 2; ++i) {
+        const auto result = handle_heartbeat(request, state, role, timer, log, now);
+        EXPECT_TRUE(result.response.success);
+        EXPECT_FALSE(result.changed_from);
+        EXPECT_EQ(log.size(), 3u);
+        EXPECT_EQ(state.commit_index, 2u);
+    }
+    const auto heartbeat = handle_heartbeat({5, 2, 0, 0, 10}, state, role, timer, log, now);
+    EXPECT_TRUE(heartbeat.response.success);
+    EXPECT_EQ(log.size(), 3u);
+    EXPECT_EQ(state.commit_index, 2u);
+}
+
+TEST_F(HeartbeatHandler, RejectsCommittedConflictsAndSameTermCommandMismatch) {
+    log = {{1, 1, "one"}, {2, 2, "two"}};
+    state.commit_index = 2;
+    EXPECT_FALSE(handle_heartbeat({5, 2, 1, 1, 2, {{2, 4, "replace"}}},
+        state, role, timer, log, now).response.success);
+    EXPECT_EQ(log[1].command, "two");
+    state.commit_index = 0;
+    EXPECT_FALSE(handle_heartbeat({5, 2, 1, 1, 0, {{2, 2, "different"}}},
+        state, role, timer, log, now).response.success);
+    EXPECT_EQ(log[1].command, "two");
+    EXPECT_FALSE(handle_heartbeat({5, 2, 3, 2, 0}, state, role, timer, log, now).response.success);
+}
+
+TEST(LogReplication, BacksOffThenAdvancesOnlyThroughAcknowledgedEntries) {
+    std::vector<LogEntry> log{{1, 1, "one"}, {2, 2, "two"}, {3, 3, "three"}};
+    LogReplication progress;
+    progress.reset(3);
+    auto request = progress.make_request(log, 5, 1, 0);
+    EXPECT_EQ(request.prev_log_index, 3u);
+    EXPECT_TRUE(request.entries.empty());
+    progress.acknowledge(false);
+    request = progress.make_request(log, 5, 1, 0);
+    EXPECT_EQ(request.prev_log_index, 2u);
+    ASSERT_EQ(request.entries.size(), 1u);
+    EXPECT_EQ(request.entries[0].index, 3u);
+    progress.acknowledge(false);
+    progress.acknowledge(false);
+    progress.acknowledge(false);
+    EXPECT_EQ(progress.next_index(), 1u);
+    request = progress.make_request(log, 5, 1, 0);
+    EXPECT_EQ(request.entries.size(), 3u);
+    progress.acknowledge(true);
+    EXPECT_EQ(progress.match_index(), 3u);
+    EXPECT_EQ(progress.next_index(), 4u);
+}
+
+TEST(LogReplication, SplitsBatchesByCountAndPayloadLimitAndRetriesAfterTimeout) {
+    std::vector<LogEntry> log;
+    for (std::uint64_t i = 1; i <= 130; ++i) log.push_back({i, 1, "command"});
+    LogReplication progress;
+    progress.reset(0);
+    auto request = progress.make_request(log, 2, 1, 0);
+    EXPECT_EQ(request.entries.size(), 128u);
+    EXPECT_EQ(progress.match_index(), 0u);
+    EXPECT_EQ(progress.make_request(log, 2, 1, 0).entries.size(), 128u); // Retry without acknowledgment.
+    progress.acknowledge(true);
+    request = progress.make_request(log, 2, 1, 0);
+    EXPECT_EQ(request.entries.size(), 2u);
+    log = {{1, 1, std::string(max_payload_size / 2, 'a')}, {2, 1, std::string(max_payload_size / 2, 'b')}};
+    progress.reset(0);
+    request = progress.make_request(log, 2, 1, 0);
+    EXPECT_EQ(request.entries.size(), 1u);
+    EXPECT_LE(make_heartbeat_request(1, request).payload.size(), max_payload_size);
 }
 
 TEST(HeartbeatScheduling, SendsImmediatelyThenEveryFiftyMilliseconds) {

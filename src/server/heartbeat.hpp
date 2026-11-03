@@ -8,10 +8,18 @@
 
 namespace zmq_template::server {
 
-inline HeartbeatResponse handle_heartbeat(
+struct HeartbeatResult {
+    HeartbeatResponse response;
+    std::optional<std::uint64_t> changed_from;
+};
+
+// Mutates in-memory state only. Persist term/vote and any changed suffix before replying.
+// Request indices and terms must already have passed RPC validation.
+inline HeartbeatResult handle_heartbeat(
     const HeartbeatRequest& request, VoteState& state, Role& role,
-    ElectionTimer& timer, ElectionTimer::Clock::time_point now = ElectionTimer::Clock::now()) {
-    if (request.term < state.current_term) return {state.current_term, false};
+    ElectionTimer& timer, std::vector<LogEntry>& log,
+    ElectionTimer::Clock::time_point now = ElectionTimer::Clock::now()) {
+    if (request.term < state.current_term) return {{state.current_term, false}, std::nullopt};
     if (request.term > state.current_term) {
         state.current_term = request.term;
         state.voted_for.reset();
@@ -20,13 +28,35 @@ inline HeartbeatResponse handle_heartbeat(
     role = Role::Follower;
     state.leader_id = request.leader_id;
     timer.reset(now);
-    // Until a log store exists, only the origin and local tail can be checked.
-    const bool matches = (request.prev_log_index == 0 && request.prev_log_term == 0)
-        || (request.prev_log_index == state.last_log_index && request.prev_log_term == state.last_log_term);
-    if (!matches) return {state.current_term, false};
-    state.commit_index = std::max(state.commit_index,
-                                  std::min(request.leader_commit, request.prev_log_index));
-    return {state.current_term, true};
+    if (request.prev_log_index > log.size()
+        || (request.prev_log_index != 0 && log[request.prev_log_index - 1].term != request.prev_log_term)
+        || (request.prev_log_index == 0 && request.prev_log_term != 0)) {
+        return {{state.current_term, false}, std::nullopt};
+    }
+    std::size_t first_new = 0;
+    while (first_new < request.entries.size()) {
+        const auto& entry = request.entries[first_new];
+        if (entry.index > log.size()) break;
+        const auto& local = log[entry.index - 1];
+        if (local.term != entry.term) {
+            if (entry.index <= state.commit_index) return {{state.current_term, false}, std::nullopt};
+            break;
+        }
+        // Same index/term must identify the same command; never silently rewrite it.
+        if (local.command != entry.command) return {{state.current_term, false}, std::nullopt};
+        ++first_new;
+    }
+    std::optional<std::uint64_t> changed_from;
+    if (first_new < request.entries.size()) {
+        changed_from = request.entries[first_new].index;
+        log.resize(static_cast<std::size_t>(*changed_from - 1));
+        log.insert(log.end(), request.entries.begin() + first_new, request.entries.end());
+    }
+    state.last_log_index = log.empty() ? 0 : log.back().index;
+    state.last_log_term = log.empty() ? 0 : log.back().term;
+    const auto matched_index = request.entries.empty() ? request.prev_log_index : request.entries.back().index;
+    state.commit_index = std::max(state.commit_index, std::min(request.leader_commit, matched_index));
+    return {{state.current_term, true}, changed_from};
 }
 
 class HeartbeatTimer {

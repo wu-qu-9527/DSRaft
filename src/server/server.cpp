@@ -7,12 +7,14 @@
 #include "server/election.hpp"
 #include "server/rpc/peer_rpc.hpp"
 #include "server/heartbeat.hpp"
+#include "server/log_replication.hpp"
 
 #include <algorithm>
 #include <cerrno>
 #include <csignal>
 #include <exception>
 #include <stdexcept>
+#include <unordered_map>
 #include <utility>
 
 namespace {
@@ -36,6 +38,8 @@ struct server::Runtime {
     bool leader_active{false};
     std::uint64_t heartbeat_term{0};
     std::vector<PeerRpc> peers;
+    std::vector<LogEntry> log;
+    std::unordered_map<std::uint64_t, LogReplication> replication;
     std::uint32_t next_rpc_id{0};
 };
 
@@ -70,7 +74,7 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     vote_state_ = {};
     vote_state_.current_term = persisted_state_.current_term;
     vote_state_.voted_for = persisted_state_.voted_for;
-    const auto log = log_storage_.load();
+    auto log = log_storage_.load();
     if (!log.empty()) {
         vote_state_.last_log_index = log.back().index;
         vote_state_.last_log_term = log.back().term;
@@ -82,6 +86,7 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     spdlog::info("Recovered persistent state term={} voted_for={}",
                  vote_state_.current_term, vote_state_.voted_for.value_or(0));
     auto runtime = std::make_unique<Runtime>(config, vote_state_, role_);
+    runtime->log = std::move(log);
     zmq_template::configure_socket(runtime->socket);
     // Poll owns the wait; a slow/disconnected peer must not block elections.
     runtime->socket.set(zmq::sockopt::rcvtimeo, 0);
@@ -113,11 +118,15 @@ void server::handle_request(Runtime& runtime) {
                          request.candidate_id, request.term, result.term, result.vote_granted, to_string(role_));
         } else if (message.type == zmq_template::MessageType::heartbeat) {
             const auto request = zmq_template::decode_heartbeat_request(message);
-            const auto result = handle_heartbeat(request, vote_state_, role_, runtime.election_timer);
-            persist_state();
-            response = zmq_template::make_heartbeat_response(message.id, result);
+            const auto result = handle_heartbeat(request, vote_state_, role_, runtime.election_timer, runtime.log);
+            persist_state(); // A higher term must be durable before logs from that term.
+            if (result.changed_from) {
+                const auto first = runtime.log.begin() + static_cast<std::size_t>(*result.changed_from - 1);
+                log_storage_.replace_suffix(*result.changed_from, {first, runtime.log.end()});
+            }
+            response = zmq_template::make_heartbeat_response(message.id, result.response);
             spdlog::debug("Heartbeat received leader={} term={} success={}",
-                          request.leader_id, request.term, result.success);
+                          request.leader_id, request.term, result.response.success);
         } else if (message.type == zmq_template::MessageType::text) {
             response = {zmq_template::MessageType::acknowledgement, message.id, "Hello, " + message.payload};
         } else {
@@ -141,6 +150,10 @@ void server::handle_peer_response(Runtime& runtime, PeerRpc& peer) {
                 persist_state();
                 runtime.election_timer.reset();
                 spdlog::info("Higher heartbeat response term={}; stepping down to Follower", response.term);
+            }
+            if (role_ == Role::Leader && request_term == vote_state_.current_term
+                && response.term == vote_state_.current_term && runtime.leader_active) {
+                runtime.replication.at(peer.id()).acknowledge(response.success);
             }
             spdlog::debug("Heartbeat response peer={} term={} success={}",
                           peer.id(), response.term, response.success);
@@ -211,16 +224,19 @@ void server::start_election(Runtime& runtime) {
 void server::tick_leader(Runtime& runtime) {
     if (!runtime.leader_active || runtime.heartbeat_term != vote_state_.current_term) {
         // Replace any outstanding election RPCs with immediate leader contact.
-        for (auto& peer : runtime.peers) peer.cancel();
+        for (auto& peer : runtime.peers) {
+            peer.cancel();
+            runtime.replication[peer.id()].reset(vote_state_.last_log_index);
+        }
         runtime.heartbeat_timer.restart();
         runtime.leader_active = true;
         runtime.heartbeat_term = vote_state_.current_term;
     }
     if (runtime.heartbeat_timer.tick()) {
-        const zmq_template::HeartbeatRequest request{vote_state_.current_term, config_.id,
-            vote_state_.last_log_index, vote_state_.last_log_term, vote_state_.commit_index};
         for (auto& peer : runtime.peers) {
             if (peer.pending()) continue;
+            const auto request = runtime.replication.at(peer.id()).make_request(runtime.log,
+                vote_state_.current_term, config_.id, vote_state_.commit_index);
             try {
                 peer.requestHeartbeat(request, ++runtime.next_rpc_id);
                 spdlog::debug("Heartbeat sent peer={} term={}", peer.id(), request.term);

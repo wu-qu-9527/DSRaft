@@ -13,7 +13,7 @@ TEST(HeartbeatRpc, RoundTripsRequestAndResponse) {
     const HeartbeatRequest request{0x0102030405060708ULL, 2, 10, 3, 8};
     const auto wire = deserialize(serialize(make_heartbeat_request(42, request)));
     EXPECT_EQ(wire.id, 42u);
-    EXPECT_EQ(wire.payload.size(), 40u);
+    EXPECT_EQ(wire.payload.size(), 48u);
     EXPECT_EQ(static_cast<unsigned char>(wire.payload[0]), 1);
     const auto decoded = decode_heartbeat_request(wire);
     EXPECT_EQ(decoded.term, request.term);
@@ -21,6 +21,7 @@ TEST(HeartbeatRpc, RoundTripsRequestAndResponse) {
     EXPECT_EQ(decoded.prev_log_index, 10u);
     EXPECT_EQ(decoded.prev_log_term, 3u);
     EXPECT_EQ(decoded.leader_commit, 8u);
+    EXPECT_TRUE(decoded.entries.empty());
     for (bool success : {true, false}) {
         const auto reply = deserialize(serialize(make_heartbeat_response(42, {request.term, success})));
         EXPECT_EQ(reply.id, 42u);
@@ -93,6 +94,37 @@ TEST_F(HeartbeatHandler, EmptyAppendEntriesCommitIsBoundedByMatchedIndex) {
     EXPECT_EQ(state.commit_index, 10u);
     handle_heartbeat({5, 2, 10, 3, 1}, state, role, timer, now);
     EXPECT_EQ(state.commit_index, 10u);
+}
+
+TEST(HeartbeatRpc, RoundTripsBinaryEntriesAndRejectsMalformedSequences) {
+    const std::string binary{"a\0b", 3};
+    const HeartbeatRequest request{6, 2, 1, 3, 2, {{2, 4, binary}, {3, 6, ""}}};
+    const auto wire = deserialize(serialize(make_heartbeat_request(9, request)));
+    const auto decoded = decode_heartbeat_request(wire);
+    ASSERT_EQ(decoded.entries.size(), 2u);
+    EXPECT_EQ(decoded.entries[0].index, 2u);
+    EXPECT_EQ(decoded.entries[0].term, 4u);
+    EXPECT_EQ(decoded.entries[0].command, binary);
+    EXPECT_TRUE(decoded.entries[1].command.empty());
+    for (std::size_t size = 0; size < wire.payload.size(); ++size) {
+        auto truncated = wire;
+        truncated.payload.resize(size);
+        EXPECT_THROW(decode_heartbeat_request(truncated), std::invalid_argument);
+    }
+    auto malformed = wire;
+    malformed.payload.push_back('x');
+    EXPECT_THROW(decode_heartbeat_request(malformed), std::invalid_argument);
+    // Entry count, index, term, and command length must each be validated on input.
+    for (const auto offset : {47u, 55u, 63u, 71u}) {
+        malformed = wire;
+        malformed.payload[offset] = static_cast<char>(0xff);
+        EXPECT_THROW(decode_heartbeat_request(malformed), std::invalid_argument);
+    }
+    EXPECT_THROW(make_heartbeat_request(1, {6, 2, 1, 3, 0, {{3, 4, "gap"}}}), std::invalid_argument);
+    EXPECT_THROW(make_heartbeat_request(1, {6, 2, 1, 3, 0, {{2, 2, "old term"}}}), std::invalid_argument);
+    EXPECT_THROW(make_heartbeat_request(1, {6, 2, 1, 3, 0, {{2, 7, "future term"}}}), std::invalid_argument);
+    EXPECT_THROW(make_heartbeat_request(1, {6, 2, 0, 0, 0, {{1, 1, std::string(max_payload_size, 'x')}}}),
+                 std::invalid_argument);
 }
 
 TEST(HeartbeatScheduling, SendsImmediatelyThenEveryFiftyMilliseconds) {

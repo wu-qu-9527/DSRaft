@@ -1,16 +1,20 @@
 #pragma once
 
 #include "common/message.hpp"
+#include "server/log_entry.hpp"
+
+#include <vector>
 
 namespace zmq_template {
 
-// AppendEntries with an empty entries list. Log replication is not yet supported.
+// AppendEntries; an empty entries list serves as a heartbeat.
 struct HeartbeatRequest {
     std::uint64_t term{0};
     std::uint64_t leader_id{0};
     std::uint64_t prev_log_index{0};
     std::uint64_t prev_log_term{0};
     std::uint64_t leader_commit{0};
+    std::vector<server::LogEntry> entries;
 };
 
 struct HeartbeatResponse {

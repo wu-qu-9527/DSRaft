@@ -24,11 +24,13 @@ struct Message {
     std::string payload;
 };
 
-inline constexpr std::size_t message_header_size = 16;
+inline constexpr std::string_view message_magic{"ZMQ1"};
+inline constexpr std::size_t message_header_size = message_magic.size() + 3 * sizeof(std::uint32_t);
 inline constexpr std::size_t max_payload_size = 1024 * 1024;
 
 // Single frame: "ZMQ1" + type/u32 + id/u32 + payload length/u32 + payload.
 // All integer fields use network byte order; payload may contain zero bytes.
+// Invalid types, malformed frames, and oversized payloads throw std::invalid_argument.
 std::string serialize(const Message& message);
 Message deserialize(std::string_view bytes);
 

@@ -1,6 +1,7 @@
 #include "common/message.hpp"
 
 #include <gtest/gtest.h>
+#include <limits>
 #include <stdexcept>
 
 namespace zmq_template {
@@ -26,7 +27,32 @@ TEST(MessageSerialization, RoundTripsTextEmptyAndBinaryPayloads) {
 TEST(MessageSerialization, RejectsEmptyAndTruncatedHeaders) {
     EXPECT_THROW(deserialize(""), std::invalid_argument);
     const auto encoded = serialize({MessageType::text, 1, "hi"});
-    EXPECT_THROW(deserialize(encoded.substr(0, 15)), std::invalid_argument);
+    for (std::size_t size = 0; size < message_header_size; ++size) {
+        SCOPED_TRACE(size);
+        EXPECT_THROW(deserialize(encoded.substr(0, size)), std::invalid_argument);
+    }
+}
+
+TEST(MessageSerialization, PreservesEveryMessageTypeAndFullWidthIds) {
+    const auto maximum_id = std::numeric_limits<std::uint32_t>::max();
+    for (const auto type : {MessageType::text, MessageType::acknowledgement, MessageType::request_vote,
+             MessageType::request_vote_response, MessageType::error, MessageType::heartbeat,
+             MessageType::heartbeat_response}) {
+        const auto decoded = deserialize(serialize({type, maximum_id, "payload"}));
+        EXPECT_EQ(decoded.type, type);
+        EXPECT_EQ(decoded.id, maximum_id);
+        EXPECT_EQ(decoded.payload, "payload");
+    }
+    for (const auto invalid : {0u, std::numeric_limits<std::uint32_t>::max()}) {
+        EXPECT_THROW(serialize((Message{static_cast<MessageType>(invalid), 1, {}})), std::invalid_argument);
+    }
+}
+
+TEST(MessageSerialization, AcceptsPayloadExactlyAtSizeLimit) {
+    const std::string payload(max_payload_size, '\xff');
+    const auto encoded = serialize({MessageType::text, 1, payload});
+    EXPECT_EQ(encoded.size(), message_header_size + max_payload_size);
+    EXPECT_EQ(deserialize(encoded).payload, payload);
 }
 
 TEST(MessageSerialization, RejectsTruncatedAndTrailingPayloadBytes) {

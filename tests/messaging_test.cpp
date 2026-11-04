@@ -97,5 +97,60 @@ TEST(RoutedCommunication, MalformedPayloadRetainsRouteAndDoesNotBreakNextRequest
     EXPECT_EQ(receive_message(client).payload, "valid");
 }
 
+TEST(RequestReplyCommunication, DrainsInvalidMultipartBeforeReceivingNextMessage) {
+    zmq::context_t context{1};
+    zmq::socket_t sender{context, zmq::socket_type::push};
+    zmq::socket_t receiver{context, zmq::socket_type::pull};
+    configure_socket(sender);
+    configure_socket(receiver);
+    receiver.bind("inproc://invalid-multipart");
+    sender.connect("inproc://invalid-multipart");
+    ASSERT_TRUE(sender.send(zmq::buffer("first", 5), zmq::send_flags::sndmore));
+    ASSERT_TRUE(sender.send(zmq::buffer("extra", 5)));
+    send_message(sender, {MessageType::text, 4, "next"});
+    EXPECT_THROW(receive_message(receiver), std::invalid_argument);
+    expect_message(receive_message(receiver), {MessageType::text, 4, "next"});
+}
+
+TEST(RoutedCommunication, DrainsMalformedEnvelopesAndExtraApplicationFrames) {
+    zmq::context_t context{1};
+    zmq::socket_t router{context, zmq::socket_type::router};
+    zmq::socket_t dealer{context, zmq::socket_type::dealer};
+    configure_socket(router);
+    configure_socket(dealer);
+    const std::string identity{"id\0x", 4};
+    dealer.set(zmq::sockopt::routing_id, identity);
+    router.bind("inproc://invalid-envelopes");
+    dealer.connect("inproc://invalid-envelopes");
+    const auto valid = serialize({MessageType::text, 5, "next"});
+    const auto send_frames = [&](const std::vector<std::string>& frames) {
+        for (std::size_t i = 0; i < frames.size(); ++i) {
+            ASSERT_TRUE(dealer.send(zmq::buffer(frames[i]),
+                i + 1 < frames.size() ? zmq::send_flags::sndmore : zmq::send_flags::none));
+        }
+    };
+    const std::vector<std::vector<std::string>> invalid{
+        {"missing delimiter"}, {"wrong delimiter", valid}, {""}, {"", valid, "extra"}};
+    for (const auto& frames : invalid) {
+        send_frames(frames);
+        std::string route;
+        EXPECT_THROW(receive_routed_message(router, route), std::invalid_argument);
+        EXPECT_EQ(route, identity);
+        send_frames({"", valid});
+        expect_message(receive_routed_message(router, route), {MessageType::text, 5, "next"});
+        EXPECT_EQ(route, identity);
+    }
+}
+
+TEST(RoutedCommunication, ReceiveTimeoutDoesNotLeavePreviousRoute) {
+    zmq::context_t context{1};
+    zmq::socket_t router{context, zmq::socket_type::router};
+    configure_socket(router);
+    router.set(zmq::sockopt::rcvtimeo, 0);
+    std::string route{"previous-client"};
+    EXPECT_THROW(receive_routed_message(router, route), std::runtime_error);
+    EXPECT_TRUE(route.empty());
+}
+
 } // namespace
 } // namespace zmq_template

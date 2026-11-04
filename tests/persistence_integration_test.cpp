@@ -1,4 +1,4 @@
-#include "common/messaging.hpp"
+#include "common/zmq_transport.hpp"
 #include "server/rpc/heartbeat_rpc.hpp"
 #include "server/rpc/vote_rpc.hpp"
 #include "server/storage/persistent_state.hpp"

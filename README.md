@@ -152,20 +152,20 @@ src/
   client/main.cpp              # REQ 客户端
   common/message.hpp           # 双方共用的 Message 结构体、类型和协议声明
   common/message.cpp           # 消息序列化与协议校验
-  common/messaging.hpp         # 共用收发接口
-  common/messaging.cpp         # socket 配置及结构体收发
+  common/zmq_transport.hpp         # ZeroMQ 消息传输接口
+  common/zmq_transport.cpp         # ZeroMQ 帧收发、路由信封和 socket 配置
   common/logging.hpp           # 共用日志初始化接口和 spdlog API
   common/logging.cpp           # 日志格式、终端输出及环境变量配置
 cmake/Testing.cmake             # GoogleTest 依赖配置
 tests/message_test.cpp         # GoogleTest 序列化与协议校验测试
-tests/messaging_test.cpp       # GoogleTest REQ/REP 请求响应测试
+tests/zmq_transport_test.cpp       # GoogleTest 消息传输与路由信封测试
 tests/election_timer_test.cpp  # 选举超时判断、显式重置与剩余时间测试
 tests/vote_rpc_test.cpp        # 投票协议与投票规则测试
 tests/node_election_test.cpp   # 节点计票和节点间 RPC、超时恢复测试
 tests/heartbeat_test.cpp       # 心跳协议、定时器、任期及收发测试
 ```
 
-新业务代码可链接 `zmq_template::messaging`；服务器配置及节点间 RPC 由 `zmq_template::server_core` 提供。
+新业务代码可链接 `zmq_template::transport`；服务器配置及节点间 RPC 由 `zmq_template::server_core` 提供。
 项目名和命名空间可按需替换。
 依赖接入方式参考 [cppzmq 官方文档](https://github.com/zeromq/cppzmq)。
 

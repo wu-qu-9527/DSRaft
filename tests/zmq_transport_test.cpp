@@ -1,4 +1,4 @@
-#include "common/messaging.hpp"
+#include "common/zmq_transport.hpp"
 
 #include <gtest/gtest.h>
 #include <exception>

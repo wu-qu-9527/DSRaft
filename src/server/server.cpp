@@ -1,5 +1,5 @@
 #include "server/server.hpp"
-#include "common/messaging.hpp"
+#include "common/zmq_transport.hpp"
 #include "common/logging.hpp"
 #include "server/state.hpp"
 #include "server/election_timer.hpp"

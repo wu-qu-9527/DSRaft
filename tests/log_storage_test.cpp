@@ -1,4 +1,4 @@
-#include "server/storage/persistent_state.hpp"
+#include "server/storage/state_storage.hpp"
 #include "server/storage/log_storage.hpp"
 
 #include <gtest/gtest.h>
@@ -11,7 +11,7 @@
 
 namespace zmq_template::server {
 namespace {
-class PersistentLogStorage : public ::testing::Test {
+class LogStorageTest : public ::testing::Test {
 protected:
     void SetUp() override {
         std::string pattern = (std::filesystem::temp_directory_path() / "raft-log-XXXXXX").string();
@@ -26,7 +26,7 @@ protected:
     std::filesystem::path directory;
 };
 
-TEST_F(PersistentLogStorage, AppendsAndRecoversBinaryCommandsAndFullWidthTerms) {
+TEST_F(LogStorageTest, AppendsAndRecoversBinaryCommandsAndFullWidthTerms) {
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
     const std::string binary{"a\0b\xff", 4};
     {
@@ -54,7 +54,7 @@ TEST_F(PersistentLogStorage, AppendsAndRecoversBinaryCommandsAndFullWidthTerms) 
     EXPECT_EQ(state.load().voted_for, 7u);
 }
 
-TEST_F(PersistentLogStorage, SharedDirectoryStaysLockedUntilBothStoresAreDestroyed) {
+TEST_F(LogStorageTest, SharedDirectoryStaysLockedUntilBothStoresAreDestroyed) {
     auto shared = std::make_shared<StorageDirectory>(directory);
     auto state = std::make_unique<StateStorage>(shared);
     auto log = std::make_unique<LogStorage>(shared);
@@ -70,7 +70,7 @@ TEST_F(PersistentLogStorage, SharedDirectoryStaysLockedUntilBothStoresAreDestroy
     EXPECT_EQ(reopened.load().current_term, 2u);
 }
 
-TEST_F(PersistentLogStorage, TruncatesSuffixAndAllowsReplacementAfterRestart) {
+TEST_F(LogStorageTest, TruncatesSuffixAndAllowsReplacementAfterRestart) {
     {
         LogStorage storage{directory};
         storage.append({{1, 1, "one"}, {2, 2, "old"}, {3, 2, "old"}});
@@ -90,7 +90,7 @@ TEST_F(PersistentLogStorage, TruncatesSuffixAndAllowsReplacementAfterRestart) {
     EXPECT_NO_THROW(reopened.append({}));
 }
 
-TEST_F(PersistentLogStorage, ReplacesSuffixAtomicallyAndRejectsInvalidReplacement) {
+TEST_F(LogStorageTest, ReplacesSuffixAtomicallyAndRejectsInvalidReplacement) {
     LogStorage log{directory};
     log.append({{1, 1, "prefix"}, {2, 2, "old"}, {3, 2, "tail"}});
     EXPECT_THROW(log.replace_suffix(2, {{3, 3, "gap"}}), StorageError);
@@ -107,7 +107,7 @@ TEST_F(PersistentLogStorage, ReplacesSuffixAtomicallyAndRejectsInvalidReplacemen
     EXPECT_EQ(entries[1].command, "new");
 }
 
-TEST_F(PersistentLogStorage, InvalidBatchesAndTruncationLeaveOldLogUnchanged) {
+TEST_F(LogStorageTest, InvalidBatchesAndTruncationLeaveOldLogUnchanged) {
     LogStorage storage{directory};
     storage.append({{1, 3, "old"}});
     EXPECT_THROW(storage.append({{2, 3, "valid"}, {4, 3, "gap"}}), StorageError);
@@ -122,7 +122,7 @@ TEST_F(PersistentLogStorage, InvalidBatchesAndTruncationLeaveOldLogUnchanged) {
     EXPECT_EQ(log[0].command, "old");
 }
 
-TEST_F(PersistentLogStorage, RejectsCorruptionTruncationAndMalformedRecords) {
+TEST_F(LogStorageTest, RejectsCorruptionTruncationAndMalformedRecords) {
     LogStorage storage{directory};
     storage.append({{1, 1, "command"}});
     std::ifstream input{directory / "log.bin", std::ios::binary};
@@ -156,7 +156,7 @@ TEST_F(PersistentLogStorage, RejectsCorruptionTruncationAndMalformedRecords) {
     }
 }
 
-TEST_F(PersistentLogStorage, IncompleteTemporaryFileIsIgnoredAndFailedWritesPreserveOldLog) {
+TEST_F(LogStorageTest, IncompleteTemporaryFileIsIgnoredAndFailedWritesPreserveOldLog) {
     {
         LogStorage storage{directory};
         storage.append({{1, 1, "old"}});

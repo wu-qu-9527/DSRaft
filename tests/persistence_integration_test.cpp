@@ -1,7 +1,7 @@
 #include "common/zmq_transport.hpp"
 #include "server/rpc/heartbeat_rpc.hpp"
 #include "server/rpc/vote_rpc.hpp"
-#include "server/storage/persistent_state.hpp"
+#include "server/storage/state_storage.hpp"
 #include "server/storage/log_storage.hpp"
 #include "server/storage/commit_storage.hpp"
 #include "server/key_value_state_machine.hpp"

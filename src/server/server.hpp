@@ -3,7 +3,7 @@
 #include "server/node_config.hpp"
 #include "common/message.hpp"
 #include "server/state.hpp"
-#include "server/storage/persistent_state.hpp"
+#include "server/storage/state_storage.hpp"
 #include "server/storage/log_storage.hpp"
 #include "server/storage/commit_storage.hpp"
 

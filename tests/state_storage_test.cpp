@@ -1,4 +1,4 @@
-#include "server/storage/persistent_state.hpp"
+#include "server/storage/state_storage.hpp"
 
 #include <gtest/gtest.h>
 
@@ -9,7 +9,7 @@
 
 namespace zmq_template::server {
 namespace {
-class PersistentStateStorage : public ::testing::Test {
+class StateStorageTest : public ::testing::Test {
 protected:
     void SetUp() override {
         std::string pattern = (std::filesystem::temp_directory_path() / "raft-state-XXXXXX").string();
@@ -24,7 +24,7 @@ protected:
     std::filesystem::path directory;
 };
 
-TEST_F(PersistentStateStorage, MissingFileStartsEmptyAndSavedStateSurvivesReopen) {
+TEST_F(StateStorageTest, MissingFileStartsEmptyAndSavedStateSurvivesReopen) {
     {
         StateStorage storage{directory};
         EXPECT_EQ(storage.load().current_term, 0u);
@@ -40,7 +40,7 @@ TEST_F(PersistentStateStorage, MissingFileStartsEmptyAndSavedStateSurvivesReopen
     EXPECT_FALSE(reopened.load().voted_for);
 }
 
-TEST_F(PersistentStateStorage, PreservesFullWidthValuesAndRejectsZeroNodeId) {
+TEST_F(StateStorageTest, PreservesFullWidthValuesAndRejectsZeroNodeId) {
     StateStorage storage{directory};
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
     storage.save({maximum, maximum});
@@ -50,7 +50,7 @@ TEST_F(PersistentStateStorage, PreservesFullWidthValuesAndRejectsZeroNodeId) {
     EXPECT_EQ(storage.load().voted_for, maximum);
 }
 
-TEST_F(PersistentStateStorage, RejectsConcurrentOwnerAndReleasesLockOnDestruction) {
+TEST_F(StateStorageTest, RejectsConcurrentOwnerAndReleasesLockOnDestruction) {
     {
         StateStorage first{directory};
         EXPECT_THROW((StateStorage{directory}), StorageError);
@@ -58,7 +58,7 @@ TEST_F(PersistentStateStorage, RejectsConcurrentOwnerAndReleasesLockOnDestructio
     EXPECT_NO_THROW((StateStorage{directory}));
 }
 
-TEST_F(PersistentStateStorage, RejectsTruncatedCorruptAndUnexpectedlyLongRecords) {
+TEST_F(StateStorageTest, RejectsTruncatedCorruptAndUnexpectedlyLongRecords) {
     StateStorage storage{directory};
     storage.save({5, 2});
     {
@@ -81,7 +81,7 @@ TEST_F(PersistentStateStorage, RejectsTruncatedCorruptAndUnexpectedlyLongRecords
     EXPECT_THROW(storage.load(), StorageError);
 }
 
-TEST_F(PersistentStateStorage, IncompleteTemporaryFileDoesNotReplaceCommittedState) {
+TEST_F(StateStorageTest, IncompleteTemporaryFileDoesNotReplaceCommittedState) {
     {
         StateStorage storage{directory};
         storage.save({5, 2});
@@ -95,7 +95,7 @@ TEST_F(PersistentStateStorage, IncompleteTemporaryFileDoesNotReplaceCommittedSta
     EXPECT_FALSE(std::filesystem::exists(directory / "state.tmp"));
 }
 
-TEST_F(PersistentStateStorage, FailedReplacementPreservesPreviouslySavedState) {
+TEST_F(StateStorageTest, FailedReplacementPreservesPreviouslySavedState) {
     StateStorage storage{directory};
     storage.save({5, 2});
     std::filesystem::create_directory(directory / "state.tmp");
@@ -104,7 +104,7 @@ TEST_F(PersistentStateStorage, FailedReplacementPreservesPreviouslySavedState) {
     EXPECT_EQ(storage.load().voted_for, 2u);
 }
 
-TEST_F(PersistentStateStorage, RejectsDataDirectoryThatIsAFile) {
+TEST_F(StateStorageTest, RejectsDataDirectoryThatIsAFile) {
     const auto file = directory / "not-a-directory";
     std::ofstream{file} << "file";
     EXPECT_THROW((StateStorage{file}), StorageError);

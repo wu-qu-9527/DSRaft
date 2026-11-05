@@ -30,7 +30,7 @@ target_link_libraries(zmq_logging PUBLIC spdlog::spdlog)
 add_library(zmq_server_core
     src/server/server.cpp
     src/server/key_value_state_machine.cpp
-    src/server/storage/persistent_state.cpp
+    src/server/storage/state_storage.cpp
     src/server/storage/commit_storage.cpp
     src/server/storage/log_storage.cpp
     src/server/storage/storage_directory.cpp
@@ -59,8 +59,8 @@ if(BUILD_TESTING)
     find_package(Threads REQUIRED)
     add_executable(zmq_tests
         tests/persistence_integration_test.cpp
-        tests/persistent_state_test.cpp
-        tests/persistent_log_test.cpp
+        tests/state_storage_test.cpp
+        tests/log_storage_test.cpp
         tests/config_parser_test.cpp
         tests/message_test.cpp
         tests/zmq_transport_test.cpp

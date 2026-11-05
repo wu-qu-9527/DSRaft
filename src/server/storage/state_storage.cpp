@@ -1,4 +1,4 @@
-#include "server/storage/persistent_state.hpp"
+#include "server/storage/state_storage.hpp"
 
 #include "common/binary_codec.hpp"
 

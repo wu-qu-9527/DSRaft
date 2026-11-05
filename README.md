@@ -396,7 +396,7 @@ SPDLOG_LEVEL=debug ./scripts/start_demo.sh --nodes 3 --no-build
 
 ## 任期与投票持久化
 
-服务端使用 `src/server/storage/persistent_state.hpp/.cpp` 中的 `StateStorage`，
+服务端使用 `src/server/storage/state_storage.hpp/.cpp` 中的 `StateStorage`，
 通过 `load()` / `save()` 整体读写 `PersistentState`，包括当前任期和本任期投给的节点 ID。
 该实现使用 Linux/POSIX 文件系统接口；当前不提供 Windows 存储后端。
 

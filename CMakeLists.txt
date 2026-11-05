@@ -5,7 +5,10 @@ option(ZMQ_TEMPLATE_USE_SYSTEM_DEPS "Use installed cppzmq, ZeroMQ, spdlog and Go
 include(cmake/Dependencies.cmake)
 include(CTest)
 
-add_library(zmq_transport src/common/zmq_transport.cpp src/common/message.cpp)
+add_library(zmq_transport
+    src/common/zmq_transport.cpp
+    src/common/message.cpp
+    src/common/binary_codec.cpp)
 add_library(zmq_template::transport ALIAS zmq_transport)
 target_compile_features(zmq_transport PUBLIC cxx_std_17)
 set_target_properties(zmq_transport PROPERTIES CXX_EXTENSIONS OFF)

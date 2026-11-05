@@ -1,5 +1,7 @@
 #include "server/storage/log_storage.hpp"
 
+#include "common/binary_codec.hpp"
+
 #include <limits>
 #include <string_view>
 #include <utility>
@@ -8,23 +10,9 @@ namespace zmq_template::server {
 namespace {
 constexpr std::string_view log_magic{"RAFTLG01"};
 
-void append_log_u64(std::string& bytes, std::uint64_t value) {
-    for (int shift = 56; shift >= 0; shift -= 8) bytes.push_back(static_cast<char>(value >> shift));
-}
-
-std::uint64_t log_checksum(std::string_view bytes) {
-    std::uint64_t value = 14695981039346656037ULL;
-    for (unsigned char byte : bytes) {
-        value ^= byte;
-        value *= 1099511628211ULL;
-    }
-    return value;
-}
-
 std::uint64_t take_log_u64(std::string_view& bytes) {
     if (bytes.size() < 8) throw StorageError("Truncated log record");
-    std::uint64_t value = 0;
-    for (std::size_t i = 0; i < 8; ++i) value = (value << 8) | static_cast<unsigned char>(bytes[i]);
+    const auto value = binary::read_u64(bytes, 0);
     bytes.remove_prefix(8);
     return value;
 }
@@ -53,7 +41,9 @@ std::vector<LogEntry> LogStorage::load() const {
     std::string_view payload{bytes->data(), bytes->size() - 8};
     std::string_view trailer{bytes->data() + bytes->size() - 8, 8};
     if (payload.substr(0, 8) != log_magic) throw StorageError("Invalid persistent log format or version");
-    if (take_log_u64(trailer) != log_checksum(payload)) throw StorageError("Persistent log checksum mismatch");
+    if (binary::read_u64(trailer, 0) != binary::fnv1a_checksum(payload)) {
+        throw StorageError("Persistent log checksum mismatch");
+    }
     payload.remove_prefix(8);
     const auto count = take_log_u64(payload);
     if (count > payload.size() / 24) throw StorageError("Invalid persistent log entry count");
@@ -77,14 +67,14 @@ std::vector<LogEntry> LogStorage::load() const {
 
 void LogStorage::save(const std::vector<LogEntry>& entries) {
     std::string bytes{log_magic};
-    append_log_u64(bytes, entries.size());
+    binary::append_u64(bytes, entries.size());
     for (const auto& entry : entries) {
-        append_log_u64(bytes, entry.index);
-        append_log_u64(bytes, entry.term);
-        append_log_u64(bytes, entry.command.size());
+        binary::append_u64(bytes, entry.index);
+        binary::append_u64(bytes, entry.term);
+        binary::append_u64(bytes, entry.command.size());
         bytes.append(entry.command);
     }
-    append_log_u64(bytes, log_checksum(bytes));
+    binary::append_u64(bytes, binary::fnv1a_checksum(bytes));
     directory_->replace("log.bin", "log.tmp", bytes);
 }
 

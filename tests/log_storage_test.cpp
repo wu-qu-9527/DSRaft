@@ -1,6 +1,8 @@
 #include "server/storage/state_storage.hpp"
 #include "server/storage/log_storage.hpp"
 
+#include "storage_test_helpers.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cstdlib>
@@ -125,35 +127,31 @@ TEST_F(LogStorageTest, InvalidBatchesAndTruncationLeaveOldLogUnchanged) {
 TEST_F(LogStorageTest, RejectsCorruptionTruncationAndMalformedRecords) {
     LogStorage storage{directory};
     storage.append({{1, 1, "command"}});
-    std::ifstream input{directory / "log.bin", std::ios::binary};
+    std::ifstream input{directory / "log.json", std::ios::binary};
     const std::string original{std::istreambuf_iterator<char>{input}, std::istreambuf_iterator<char>{}};
     const auto write = [&](const std::string& bytes) {
-        std::ofstream output{directory / "log.bin", std::ios::binary | std::ios::trunc};
+        std::ofstream output{directory / "log.json", std::ios::binary | std::ios::trunc};
         output.write(bytes.data(), bytes.size());
     };
     write(original.substr(0, 12));
     EXPECT_THROW(storage.load(), StorageError);
     write(original + "extra");
     EXPECT_THROW(storage.load(), StorageError);
-    auto damaged = original;
-    damaged[40] ^= 1;
-    write(damaged);
+    auto damaged = nlohmann::json::parse(original);
+    damaged["data"]["entries"][0]["command"] = "changed";
+    write(damaged.dump()); // Intact JSON with an invalid checksum.
     EXPECT_THROW(storage.load(), StorageError);
-    // Recompute checksums so structural validation is exercised independently.
-    for (const auto offset : {0u, 15u, 23u, 31u, 39u}) {
-        damaged = original;
-        damaged[offset] = offset == 31 ? 0 : static_cast<char>(0xff);
-        std::uint64_t hash = 14695981039346656037ULL;
-        for (std::size_t i = 0; i < damaged.size() - 8; ++i) {
-            hash ^= static_cast<unsigned char>(damaged[i]);
-            hash *= 1099511628211ULL;
-        }
-        for (std::size_t i = 0; i < 8; ++i) {
-            damaged[damaged.size() - 8 + i] = static_cast<char>(hash >> (56 - 8 * i));
-        }
-        write(damaged);
-        EXPECT_THROW(storage.load(), StorageError) << "offset=" << offset;
+    const auto valid = nlohmann::json::parse(original);
+    for (const auto& field : {"index", "term", "command"}) {
+        damaged = valid;
+        damaged["data"]["entries"][0][field] = nullptr;
+        test::write_json(directory / "log.json", damaged);
+        EXPECT_THROW(storage.load(), StorageError) << "field=" << field;
     }
+    damaged = valid;
+    damaged["data"]["entries"][0]["index"] = 2;
+    test::write_json(directory / "log.json", damaged);
+    EXPECT_THROW(storage.load(), StorageError);
 }
 
 TEST_F(LogStorageTest, IncompleteTemporaryFileIsIgnoredAndFailedWritesPreserveOldLog) {
@@ -171,6 +169,51 @@ TEST_F(LogStorageTest, IncompleteTemporaryFileIsIgnoredAndFailedWritesPreserveOl
     EXPECT_THROW(reopened.truncate_suffix(1), StorageError);
     EXPECT_EQ(reopened.load().size(), 2u);
     EXPECT_EQ(reopened.load().back().command, "new");
+}
+
+TEST_F(LogStorageTest, PreservesTextAndBinaryCommandsInJson) {
+    LogStorage storage{directory};
+    const std::string binary{"a\0\xff", 3};
+    storage.append({{1, 7, binary}, {2, 7, "SET greeting 你好"}, {3, 7, ""}});
+    const auto record = test::read_json(directory / "log.json");
+    EXPECT_EQ(record.at("format"), "raft-log");
+    EXPECT_EQ(record.at("data").at("entries")[0].at("command_hex"), "6100ff");
+    EXPECT_EQ(record.at("data").at("entries")[1].at("command"), "SET greeting 你好");
+    EXPECT_EQ(storage.load()[0].command, binary);
+    EXPECT_EQ(storage.load()[2].command, "");
+    std::ofstream{directory / "log.json"} << "partial";
+    EXPECT_THROW(storage.load(), StorageError);
+}
+
+TEST_F(LogStorageTest, RejectsInvalidHexAndAmbiguousCommandEncoding) {
+    LogStorage storage{directory};
+    storage.append({{1, 1, "command"}});
+    const auto original = test::read_json(directory / "log.json");
+    for (const auto* hex : {"0", "zz"}) {
+        auto record = original;
+        auto& entry = record["data"]["entries"][0];
+        entry.erase("command");
+        entry["command_hex"] = hex;
+        test::write_json(directory / "log.json", record);
+        EXPECT_THROW(storage.load(), StorageError);
+    }
+    auto record = original;
+    record["data"]["entries"][0]["command_hex"] = "61";
+    test::write_json(directory / "log.json", record);
+    EXPECT_THROW(storage.load(), StorageError);
+}
+
+TEST_F(LogStorageTest, RoundTripsAllByteValuesAndEscapedUtf8Commands) {
+    std::string binary;
+    for (int byte = 0; byte < 256; ++byte) binary.push_back(static_cast<char>(byte));
+    const std::string text{"SET key a\0b\n\"\\", 14};
+    LogStorage storage{directory};
+    storage.append({{1, 1, binary}, {2, 1, text}});
+    const auto entries = storage.load();
+    ASSERT_EQ(entries.size(), 2u);
+    EXPECT_EQ(entries[0].command, binary);
+    EXPECT_EQ(entries[1].command, text);
+    EXPECT_EQ(test::read_json(directory / "log.json").at("data").at("entries")[1].at("command"), text);
 }
 } // namespace
 } // namespace zmq_template::server

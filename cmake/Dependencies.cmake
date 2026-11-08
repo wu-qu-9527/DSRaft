@@ -1,6 +1,7 @@
 if(ZMQ_TEMPLATE_USE_SYSTEM_DEPS)
     find_package(cppzmq CONFIG REQUIRED)
     find_package(spdlog 1.9 CONFIG REQUIRED)
+    find_package(nlohmann_json 3.11 CONFIG REQUIRED)
 else()
     include(FetchContent)
     # libzmq 4.3.5 declares an old policy baseline; CMake 4 needs this override.
@@ -36,4 +37,10 @@ else()
         URL https://github.com/gabime/spdlog/archive/refs/tags/v1.15.3.tar.gz
         DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
     FetchContent_MakeAvailable(spdlog)
+    set(JSON_BuildTests OFF CACHE BOOL "" FORCE)
+    set(JSON_Install OFF CACHE BOOL "" FORCE)
+    FetchContent_Declare(nlohmann_json
+        URL https://github.com/nlohmann/json/releases/download/v3.12.0/json.tar.xz
+        DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+    FetchContent_MakeAvailable(nlohmann_json)
 endif()

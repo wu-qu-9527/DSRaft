@@ -1,5 +1,7 @@
 #include "server/storage/state_storage.hpp"
 
+#include "storage_test_helpers.hpp"
+
 #include <gtest/gtest.h>
 
 #include <cstdlib>
@@ -50,6 +52,22 @@ TEST_F(StateStorageTest, PreservesFullWidthValuesAndRejectsZeroNodeId) {
     EXPECT_EQ(storage.load().voted_for, maximum);
 }
 
+TEST_F(StateStorageTest, WritesReadableJsonWithExactTermAndNullableVote) {
+    StateStorage storage{directory};
+    const auto maximum = std::numeric_limits<std::uint64_t>::max();
+    storage.save({maximum, 42});
+    std::ifstream input{directory / "state.json"};
+    ASSERT_TRUE(input.good());
+    const auto record = nlohmann::json::parse(input);
+    EXPECT_EQ(record.at("format"), "raft-state");
+    EXPECT_EQ(record.at("version"), 1);
+    EXPECT_EQ(record.at("data").at("current_term").get<std::uint64_t>(), maximum);
+    EXPECT_EQ(record.at("data").at("voted_for"), 42);
+    storage.save({maximum, std::nullopt});
+    std::ifstream updated{directory / "state.json"};
+    EXPECT_TRUE(nlohmann::json::parse(updated).at("data").at("voted_for").is_null());
+}
+
 TEST_F(StateStorageTest, RejectsConcurrentOwnerAndReleasesLockOnDestruction) {
     {
         StateStorage first{directory};
@@ -62,20 +80,20 @@ TEST_F(StateStorageTest, RejectsTruncatedCorruptAndUnexpectedlyLongRecords) {
     StateStorage storage{directory};
     storage.save({5, 2});
     {
-        std::fstream file{directory / "state.bin", std::ios::binary | std::ios::in | std::ios::out};
+        std::fstream file{directory / "state.json", std::ios::binary | std::ios::in | std::ios::out};
         file.seekp(15);
         file.put('\x04');
     }
     EXPECT_THROW(storage.load(), StorageError);
     storage.save({5, 2});
-    std::filesystem::resize_file(directory / "state.bin", 12);
+    std::filesystem::resize_file(directory / "state.json", 12);
     EXPECT_THROW(storage.load(), StorageError);
     storage.save({5, 2});
-    std::filesystem::resize_file(directory / "state.bin", 33);
+    std::filesystem::resize_file(directory / "state.json", 33);
     EXPECT_THROW(storage.load(), StorageError);
     storage.save({5, 2});
     {
-        std::fstream file{directory / "state.bin", std::ios::binary | std::ios::in | std::ios::out};
+        std::fstream file{directory / "state.json", std::ios::binary | std::ios::in | std::ios::out};
         file.put('X');
     }
     EXPECT_THROW(storage.load(), StorageError);
@@ -102,6 +120,54 @@ TEST_F(StateStorageTest, FailedReplacementPreservesPreviouslySavedState) {
     EXPECT_THROW(storage.save({6, 3}), StorageError);
     EXPECT_EQ(storage.load().current_term, 5u);
     EXPECT_EQ(storage.load().voted_for, 2u);
+}
+
+TEST_F(StateStorageTest, RejectsInvalidJsonFieldsAndChecksum) {
+    StateStorage storage{directory};
+    storage.save({7, 42});
+    const auto original = test::read_json(directory / "state.json");
+    auto damaged = original;
+    damaged["data"]["current_term"] = 8;
+    std::ofstream{directory / "state.json"} << damaged.dump();
+    EXPECT_THROW(storage.load(), StorageError);
+    for (const auto& value : {nlohmann::json(-1), nlohmann::json(1.5), nlohmann::json(true),
+                              nlohmann::json("7"), nlohmann::json(18446744073709551616.0)}) {
+        damaged = original;
+        damaged["data"]["current_term"] = value;
+        test::write_json(directory / "state.json", damaged);
+        EXPECT_THROW(storage.load(), StorageError);
+    }
+    for (const auto& field : {"version", "format", "data"}) {
+        damaged = original;
+        damaged.erase(field);
+        test::write_json(directory / "state.json", damaged);
+        EXPECT_THROW(storage.load(), StorageError) << field;
+    }
+    damaged = original;
+    damaged["version"] = 2;
+    test::write_json(directory / "state.json", damaged);
+    EXPECT_THROW(storage.load(), StorageError);
+    damaged = original;
+    damaged["data"]["voted_for"] = 0;
+    test::write_json(directory / "state.json", damaged);
+    EXPECT_THROW(storage.load(), StorageError);
+    damaged = original;
+    damaged["format"] = "raft-commit";
+    test::write_json(directory / "state.json", damaged);
+    EXPECT_THROW(storage.load(), StorageError);
+    const auto duplicate = original.dump();
+    std::ofstream{directory / "state.json"} << "{\"version\":1," << duplicate.substr(1);
+    EXPECT_THROW(storage.load(), StorageError);
+}
+
+TEST_F(StateStorageTest, AcceptsReformattedJsonAndRejectsExcessiveNesting) {
+    StateStorage storage{directory};
+    storage.save({7, 42});
+    const auto record = test::read_json(directory / "state.json");
+    std::ofstream{directory / "state.json"} << record.dump(4) << "\n\n";
+    EXPECT_EQ(storage.load().current_term, 7u);
+    std::ofstream{directory / "state.json"} << std::string(100, '[') << '0' << std::string(100, ']');
+    EXPECT_THROW(storage.load(), StorageError);
 }
 
 TEST_F(StateStorageTest, RejectsDataDirectoryThatIsAFile) {

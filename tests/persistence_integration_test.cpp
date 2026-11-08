@@ -7,6 +7,7 @@
 #include "server/state_machine/key_value_state_machine.hpp"
 
 #include <gtest/gtest.h>
+#include <nlohmann/json.hpp>
 
 #include <chrono>
 #include <csignal>
@@ -108,7 +109,7 @@ protected:
 
 TEST_F(PersistentServer, SingleNodeBusinessCommandsCommitAndRecoverState) {
     start(true);
-    for (int i = 0; i < 200 && !std::filesystem::exists(data_dir / "commit.bin"); ++i) {
+    for (int i = 0; i < 200 && !std::filesystem::exists(data_dir / "commit.json"); ++i) {
         std::this_thread::sleep_for(10ms);
     }
     ASSERT_EQ(call({MessageType::text, 1, "SET key value"}).payload, "OK");
@@ -141,10 +142,10 @@ TEST_F(PersistentServer, RecoveryReplaysOnlyCommittedPrefix) {
 
 TEST_F(PersistentServer, SingleNodeCommitsAnElectionNoop) {
     start(true);
-    for (int i = 0; i < 200 && !std::filesystem::exists(data_dir / "commit.bin"); ++i) {
+    for (int i = 0; i < 200 && !std::filesystem::exists(data_dir / "commit.json"); ++i) {
         std::this_thread::sleep_for(10ms);
     }
-    ASSERT_TRUE(std::filesystem::exists(data_dir / "commit.bin"));
+    ASSERT_TRUE(std::filesystem::exists(data_dir / "commit.json"));
     process.reset();
     auto directory = std::make_shared<StorageDirectory>(data_dir);
     LogStorage log{directory};
@@ -179,7 +180,7 @@ TEST_F(PersistentServer, DoesNotCommitUntilPeerConfirmsCurrentTermNoop) {
     ASSERT_EQ(request.entries.size(), 1u);
     EXPECT_EQ(request.entries.back().term, 2u);
     EXPECT_TRUE(request.entries.back().command.empty());
-    EXPECT_FALSE(std::filesystem::exists(data_dir / "commit.bin"));
+    EXPECT_FALSE(std::filesystem::exists(data_dir / "commit.json"));
     send_message(peer, make_heartbeat_response(incoming.id, {2, true}));
     incoming = receive_message(peer);
     EXPECT_EQ(decode_heartbeat_request(incoming).leader_commit, 2u);
@@ -301,10 +302,10 @@ TEST_F(PersistentServer, LeaderRetriesAndCopiesMultipleBatchesToDivergentFollowe
         std::ifstream file{path, std::ios::binary};
         return std::string{std::istreambuf_iterator<char>{file}, std::istreambuf_iterator<char>{}};
     };
-    const auto expected = contents(data_dir / "log.bin");
+    const auto expected = contents(data_dir / "log.json");
     bool replicated = false;
     for (int i = 0; i < 500; ++i) {
-        const auto copied = contents(follower_data / "log.bin");
+        const auto copied = contents(follower_data / "log.json");
         if (copied.size() > expected.size() && copied.find("command-131") != std::string::npos) {
             replicated = true;
             break;
@@ -346,7 +347,7 @@ TEST_F(PersistentServer, CorruptLogRefusesStartupBeforeListening) {
         storage.save({5, std::nullopt});
         log.append({{1, 5, "command"}});
     }
-    std::ofstream{data_dir / "log.bin", std::ios::binary | std::ios::trunc} << "partial";
+    std::ofstream{data_dir / "log.json", std::ios::binary | std::ios::trunc} << "partial";
     start();
     EXPECT_EQ(process->wait_for_exit(), 1);
 }
@@ -380,10 +381,10 @@ TEST_F(PersistentServer, VoteAndHigherHeartbeatTermSurviveAbruptRestart) {
 
 TEST_F(PersistentServer, SelfVoteIsPersistedBeforeRestart) {
     start(true);
-    for (int i = 0; i < 200 && !std::filesystem::exists(data_dir / "state.bin"); ++i) {
+    for (int i = 0; i < 200 && !std::filesystem::exists(data_dir / "state.json"); ++i) {
         std::this_thread::sleep_for(10ms);
     }
-    ASSERT_TRUE(std::filesystem::exists(data_dir / "state.bin"));
+    ASSERT_TRUE(std::filesystem::exists(data_dir / "state.json"));
     process.reset();
     {
         StateStorage storage{data_dir};
@@ -437,7 +438,7 @@ TEST_F(PersistentServer, CorruptStateRefusesStartupBeforeListening) {
         StateStorage storage{data_dir};
         storage.save({5, 2});
     }
-    std::ofstream{data_dir / "state.bin", std::ios::binary | std::ios::trunc} << "partial";
+    std::ofstream{data_dir / "state.json", std::ios::binary | std::ios::trunc} << "partial";
     start();
     EXPECT_EQ(process->wait_for_exit(), 1);
     EXPECT_FALSE(std::filesystem::exists(root / "server.sock"));
@@ -489,16 +490,16 @@ protected:
         throw std::runtime_error("Cluster did not elect an available leader");
     }
     static std::uint64_t read_index(const std::filesystem::path& path) {
-        std::ifstream input{path, std::ios::binary};
-        std::string bytes(16, '\0');
-        if (!input.read(bytes.data(), bytes.size())) return 0;
-        std::uint64_t value = 0;
-        for (std::size_t i = 8; i < 16; ++i) value = (value << 8) | static_cast<unsigned char>(bytes[i]);
-        return value;
+        std::ifstream input{path};
+        if (!input) return 0;
+        const auto data = nlohmann::json::parse(input).at("data");
+        if (path.stem() == "state") return data.at("current_term").get<std::uint64_t>();
+        if (path.stem() == "log") return data.at("entries").size();
+        return data.at("index").get<std::uint64_t>();
     }
     bool wait_for_commit(int i, std::uint64_t index) {
         for (int attempt = 0; attempt < 300; ++attempt) {
-            if (read_index(directories[i] / "commit.bin") >= index) return true;
+            if (read_index(directories[i] / "commit.json") >= index) return true;
             std::this_thread::sleep_for(10ms);
         }
         return false;
@@ -514,7 +515,7 @@ TEST_F(CommittedCluster, CommitsWithOneFollowerDownAndPreservesStateAcrossLeader
     const int follower = (original + 1) % 3;
     nodes[follower].reset();
     ASSERT_EQ(command(original, "SET key majority").payload, "OK");
-    const auto committed = read_index(directories[original] / "commit.bin");
+    const auto committed = read_index(directories[original] / "commit.json");
     start_node(follower);
     ASSERT_TRUE(wait_for_commit(follower, committed));
     nodes[original].reset();
@@ -523,7 +524,7 @@ TEST_F(CommittedCluster, CommitsWithOneFollowerDownAndPreservesStateAcrossLeader
     ASSERT_EQ(command(successor, "GET key").payload, "VALUE majority");
     ASSERT_EQ(command(successor, "SET key successor").payload, "OK");
     start_node(original);
-    const auto latest = read_index(directories[successor] / "commit.bin");
+    const auto latest = read_index(directories[successor] / "commit.json");
     for (int i = 0; i < 3; ++i) ASSERT_TRUE(wait_for_commit(i, latest));
     for (auto& node : nodes) node.reset();
     for (int i = 0; i < 3; ++i) {
@@ -540,11 +541,11 @@ TEST_F(CommittedCluster, IsolatedLeaderCannotReturnSuccessfulWrite) {
     const int leader = find_leader();
     ASSERT_EQ(command(leader, "SET key committed").payload, "OK");
     for (int i = 0; i < 3; ++i) if (i != leader) nodes[i].reset();
-    const auto committed = read_index(directories[leader] / "commit.bin");
+    const auto committed = read_index(directories[leader] / "commit.json");
     const auto response = command(leader, "SET key isolated");
     EXPECT_EQ(response.type, MessageType::error);
     EXPECT_NE(response.payload.find("outcome unknown"), std::string::npos);
-    EXPECT_EQ(read_index(directories[leader] / "commit.bin"), committed);
+    EXPECT_EQ(read_index(directories[leader] / "commit.json"), committed);
 }
 
 TEST_F(CommittedCluster, PendingClientDoesNotBlockHeartbeatAndCannotReceiveOverwrittenCommandsResult) {
@@ -559,13 +560,13 @@ TEST_F(CommittedCluster, PendingClientDoesNotBlockHeartbeatAndCannotReceiveOverw
     contact.set(zmq::sockopt::linger, 0);
     client.connect(endpoints[leader]);
     contact.connect(endpoints[leader]);
-    const auto before = read_index(directories[leader] / "log.bin");
-    const auto term = read_index(directories[leader] / "state.bin");
+    const auto before = read_index(directories[leader] / "log.json");
+    const auto term = read_index(directories[leader] / "state.json");
     send_message(client, {MessageType::text, 51, "SET key pending"});
-    for (int i = 0; i < 100 && read_index(directories[leader] / "log.bin") == before; ++i) {
+    for (int i = 0; i < 100 && read_index(directories[leader] / "log.json") == before; ++i) {
         std::this_thread::sleep_for(10ms);
     }
-    ASSERT_EQ(read_index(directories[leader] / "log.bin"), before + 1);
+    ASSERT_EQ(read_index(directories[leader] / "log.json"), before + 1);
     send_message(contact, make_heartbeat_request(52, {term + 1, 99, before, term, before + 1,
         {{before + 1, term + 1, "SET key replacement"}}}));
     ASSERT_TRUE(decode_heartbeat_response(receive_message(contact)).success);

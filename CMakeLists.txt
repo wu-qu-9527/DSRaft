@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 project(zmq_template VERSION 0.1.0 LANGUAGES CXX)
 
-option(ZMQ_TEMPLATE_USE_SYSTEM_DEPS "Use installed cppzmq, ZeroMQ, spdlog and GoogleTest" OFF)
+option(ZMQ_TEMPLATE_USE_SYSTEM_DEPS "Use installed cppzmq, ZeroMQ, spdlog, nlohmann_json and GoogleTest" OFF)
 include(cmake/Dependencies.cmake)
 include(CTest)
 
@@ -34,13 +34,14 @@ add_library(zmq_server_core
     src/server/storage/commit_storage.cpp
     src/server/storage/log_storage.cpp
     src/server/storage/storage_directory.cpp
+    src/server/storage/json_record.cpp
     src/server/config/config_parser.cpp
     src/server/rpc/vote_rpc.cpp
     src/server/rpc/heartbeat_rpc.cpp)
 add_library(zmq_template::server_core ALIAS zmq_server_core)
 target_link_libraries(zmq_server_core
     PUBLIC zmq_template::transport
-    PRIVATE zmq_template::logging)
+    PRIVATE zmq_template::logging nlohmann_json::nlohmann_json)
 set_target_properties(zmq_server_core PROPERTIES CXX_EXTENSIONS OFF)
 if(MSVC)
     target_compile_options(zmq_server_core PRIVATE /W4 /permissive-)
@@ -72,7 +73,7 @@ if(BUILD_TESTING)
         tests/commit_storage_test.cpp
         tests/key_value_state_machine_test.cpp)
     target_link_libraries(zmq_tests PRIVATE
-        zmq_template::server_core GTest::gtest_main Threads::Threads)
+        zmq_template::server_core GTest::gtest_main Threads::Threads nlohmann_json::nlohmann_json)
     add_dependencies(zmq_tests zmq_server)
     target_compile_definitions(zmq_tests PRIVATE ZMQ_SERVER_PATH="$<TARGET_FILE:zmq_server>")
     include(GoogleTest)

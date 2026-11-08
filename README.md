@@ -5,7 +5,7 @@ C++17，使用 cppzmq（ZeroMQ 官方 C++ 绑定），实现固定成员 Raft �
 ## 环境
 
 - CMake >= 3.24、Ninja、支持 C++17 的编译器。
-- 首次配置需要联网，从 GitHub 下载 libzmq 4.3.5、cppzmq 4.10.0 和 spdlog 1.15.3，后续构建使用缓存。启用测试时还会下载 GoogleTest 1.17.0。
+- 首次配置需要联网，从 GitHub 下载 libzmq 4.3.5、cppzmq 4.10.0、spdlog 1.15.3 和 nlohmann/json 3.12.0，后续构建使用缓存。启用测试时还会下载 GoogleTest 1.17.0。
 - Linux 示例：`sudo apt install build-essential cmake ninja-build`。
 - Windows 请在 Visual Studio Developer PowerShell 中运行，并安装 CMake 和 Ninja。
 - macOS 需安装 Xcode Command Line Tools、CMake 和 Ninja。
@@ -109,10 +109,10 @@ tmux kill-session -t raft-demo
 
 ## 使用本机依赖（离线配置）
 
-预先安装 ZeroMQ 和 cppzmq，例如 Ubuntu/Debian：
+预先安装 ZeroMQ、cppzmq、spdlog、GoogleTest 和 nlohmann/json（3.11+），例如 Ubuntu/Debian：
 
 ```sh
-sudo apt install libzmq3-dev cppzmq-dev libspdlog-dev libgtest-dev
+sudo apt install libzmq3-dev cppzmq-dev libspdlog-dev libgtest-dev nlohmann-json3-dev
 cmake --preset debug -DZMQ_TEMPLATE_USE_SYSTEM_DEPS=ON
 cmake --build --preset debug --parallel
 ctest --preset debug
@@ -416,16 +416,35 @@ SPDLOG_LEVEL=debug ./scripts/start_demo.sh --nodes 3 --no-build
 
 | 文件 | 用途 |
 | --- | --- |
-| `state.bin` | 正式状态记录，包含版本标识、任期、投票和校验和 |
+| `state.json` | JSON 状态记录，包含版本、任期、投票和校验和 |
 | `state.tmp` | 原子替换前的临时记录，未完成的临时文件不会作为恢复状态 |
 | `state.lock` | 生命周期内持有的目录锁，进程退出后由系统释放 |
-| `log.bin` | 带版本标识、条目数和校验和的正式日志文件 |
+| `log.json` | JSON 日志记录，包含版本、条目和校验和 |
 | `log.tmp` | 日志原子替换前的临时文件，启动恢复时忽略 |
-| `commit.bin` / `commit.tmp` | 已提交索引及对应任期的正式检查点 / 原子替换临时文件 |
+| `commit.json` / `commit.tmp` | 已提交索引及对应任期的正式检查点 / 原子替换临时文件 |
 
 保存顺序为写入临时文件、同步临时文件、原子替换正式文件、同步数据目录。
-记录固定为 32 字节：8 字节版本标识 `RAFTST01`、8 字节大端任期、8 字节大端投票 ID、
-8 字节大端 FNV-1a 校验和；投票 ID 为 0 表示尚未投票。校验和用于检测意外损坏，不用于身份认证。
+三种正式文件使用 nlohmann/json 生成缩进为两空格的 UTF-8 JSON，包含 `format`、`version`、
+`data` 和 `checksum`。例如 `state.json` 可以直接查看。
+
+```json
+{
+  "checksum": 12674712730516084947,
+  "data": {
+    "current_term": 7,
+    "voted_for": 42
+  },
+  "format": "raft-state",
+  "version": 1
+}
+```
+
+`voted_for` 为 `null` 表示尚未投票。整数严格按 uint64 读取，支持最大值 18446744073709551615，
+负数、小数、布尔值和数字字符串均被拒绝。FNV-1a 校验和覆盖移除 `checksum` 后由库默认
+`dump()` 生成的紧凑 JSON（对象键按字典序排列）；调整缩进和对象字段顺序不会影响校验。
+字段值变化会触发校验失败，版本、字段类型和重复字段也会检查。
+
+启动时读取 JSON 正式文件，缺少文件时使用空状态；已有文件损坏时抛出存储错误。
 
 发起新选举时先保存任期和自投票，再发送 RequestVote；处理投票或心跳请求后，
 先保存发生变化的任期/投票再回复；处理更高任期响应时也先保存状态再继续运行。
@@ -453,15 +472,16 @@ log.truncate_suffix(2); // 删除索引 >= 2 的后缀，保留索引 1
 也可以单独通过目录路径构造任一存储；同一节点同时使用两者时，必须共享同一个 `StorageDirectory`，
 避免重复获取目录独占锁。只要任一存储仍引用该目录对象，锁就会保持。
 每次追加或截断都完整重写日志文件，经临时文件同步、原子替换和目录同步后才返回；当前实现适合小规模演示，
-写入成本随日志总大小增长。文件头为 8 字节 `RAFTLG01` 和 8 字节条目数，每条记录包含
-8 字节索引、8 字节任期、8 字节命令长度及命令字节；文件末尾是覆盖前面全部内容的 8 字节 FNV-1a 校验和。
-整数均使用大端编码。缺少 `log.bin` 表示空日志；已有日志损坏、索引不连续或日志任期超过当前任期时拒绝启动。
+写入成本随日志总大小增长。`log.json` 的 `format` 为 `raft-log`，`data.entries` 是日志数组，
+每条记录包含 `index`、`term` 和 `command`。普通命令以可读字符串保存，NUL 等控制字符由 JSON 转义；
+非 UTF-8 命令改用 `command_hex` 保存十六进制字节，读取时完整恢复。两种命令字段必须且只能出现一种。
+缺少新旧日志文件表示空日志；已有日志损坏、索引不连续或日志任期超过当前任期时拒绝启动。
 日志落盘不代表已提交；启动时根据独立的提交检查点重放已提交前缀，未提交后缀保留但不应用。
 
 ## 提交位置与状态机恢复
 
-`CommitStorage` 与任期/投票、日志存储共享目录锁。`commit.bin` 使用 32 字节记录：
-`RAFTCT01`、大端提交索引、大端对应日志任期、FNV-1a 校验和，各占 8 字节。
+`CommitStorage` 与任期/投票、日志存储共享目录锁。`commit.json` 的 `format` 为 `raft-commit`，
+`data` 包含提交索引 `index` 和对应日志任期 `term`。
 提交位置只向前推进；启动时校验其索引和任期与日志一致，损坏或日志缺失时拒绝启动。
 缺少检查点的旧数据目录从提交索引 0 开始，不把仅已落盘的日志误认为已提交。
 

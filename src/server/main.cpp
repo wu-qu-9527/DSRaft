@@ -1,6 +1,6 @@
 #include "common/logging.hpp"
 #include "server/server.hpp"
-#include "server/config_parser.hpp"
+#include "server/config/config_parser.hpp"
 
 #include <exception>
 #include <iostream>

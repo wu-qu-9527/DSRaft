@@ -1,4 +1,4 @@
-#include "server/config_parser.hpp"
+#include "server/config/config_parser.hpp"
 
 #include <gtest/gtest.h>
 

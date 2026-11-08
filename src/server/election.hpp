@@ -1,7 +1,7 @@
 #pragma once
 
 #include "server/rpc/vote_rpc.hpp"
-#include "server/node_config.hpp"
+#include "server/config/node_config.hpp"
 #include "server/state.hpp"
 
 #include <limits>

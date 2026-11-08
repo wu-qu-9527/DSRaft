@@ -29,12 +29,12 @@ target_link_libraries(zmq_logging PUBLIC spdlog::spdlog)
 
 add_library(zmq_server_core
     src/server/server.cpp
-    src/server/key_value_state_machine.cpp
+    src/server/state_machine/key_value_state_machine.cpp
     src/server/storage/state_storage.cpp
     src/server/storage/commit_storage.cpp
     src/server/storage/log_storage.cpp
     src/server/storage/storage_directory.cpp
-    src/server/config_parser.cpp
+    src/server/config/config_parser.cpp
     src/server/rpc/vote_rpc.cpp
     src/server/rpc/heartbeat_rpc.cpp)
 add_library(zmq_template::server_core ALIAS zmq_server_core)

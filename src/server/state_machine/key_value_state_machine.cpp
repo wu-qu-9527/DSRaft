@@ -1,4 +1,4 @@
-#include "server/key_value_state_machine.hpp"
+#include "server/state_machine/key_value_state_machine.hpp"
 
 #include <stdexcept>
 #include <string_view>

@@ -4,7 +4,7 @@
 #include "server/storage/state_storage.hpp"
 #include "server/storage/log_storage.hpp"
 #include "server/storage/commit_storage.hpp"
-#include "server/key_value_state_machine.hpp"
+#include "server/state_machine/key_value_state_machine.hpp"
 
 #include <gtest/gtest.h>
 

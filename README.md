@@ -136,9 +136,9 @@ src/
   server/state.hpp             # 角色类型、任期、已投票节点和日志末尾元数据
   server/vote_handler.hpp      # voteFor：接收 RequestVote 并返回结果
   server/rpc/peer_rpc.hpp          # requestVoteFor：节点间异步 REQ/ROUTER 调用
-  server/node_config.hpp       # 节点 ID 和固定 peer 配置数据结构
-  server/config_parser.hpp     # 命令行配置解析接口
-  server/config_parser.cpp     # 命令行配置解析与校验
+  server/config/node_config.hpp       # 节点 ID 和固定 peer 配置数据结构
+  server/config/config_parser.hpp     # 命令行配置解析接口
+  server/config/config_parser.cpp     # 命令行配置解析与校验
   server/rpc/vote_rpc.hpp          # RequestVote 请求与响应结构体
   server/rpc/vote_rpc.cpp          # 投票 RPC 编解码
   server/rpc/heartbeat_rpc.hpp     # AppendEntries 日志复制与空心跳请求/响应
@@ -146,7 +146,7 @@ src/
   server/election.hpp          # 任期、自投、计票和 Leader 转换
   server/heartbeat.hpp         # 心跳定时器与日志匹配处理
   server/commit_index.hpp      # 当前任期多数提交规则
-  server/key_value_state_machine.hpp # 顺序应用的键值状态机
+  server/state_machine/key_value_state_machine.hpp # 顺序应用的键值状态机
   server/storage/commit_storage.hpp  # 提交位置的持久化与恢复
   server/election_timer.hpp    # 随机选举定时器，使用单调时钟
   client/main.cpp              # REQ 客户端

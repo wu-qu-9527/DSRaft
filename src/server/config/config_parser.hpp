@@ -1,6 +1,6 @@
 #pragma once
 
-#include "server/node_config.hpp"
+#include "server/config/node_config.hpp"
 
 #include <string_view>
 

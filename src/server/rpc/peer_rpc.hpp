@@ -3,7 +3,7 @@
 #include "common/zmq_transport.hpp"
 #include "server/rpc/vote_rpc.hpp"
 #include "server/rpc/heartbeat_rpc.hpp"
-#include "server/node_config.hpp"
+#include "server/config/node_config.hpp"
 
 #include <chrono>
 #include <memory>

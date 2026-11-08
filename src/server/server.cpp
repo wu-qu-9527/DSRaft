@@ -8,7 +8,7 @@
 #include "server/rpc/peer_rpc.hpp"
 #include "server/heartbeat.hpp"
 #include "server/log_replication.hpp"
-#include "server/key_value_state_machine.hpp"
+#include "server/state_machine/key_value_state_machine.hpp"
 #include "server/commit_index.hpp"
 
 #include <algorithm>

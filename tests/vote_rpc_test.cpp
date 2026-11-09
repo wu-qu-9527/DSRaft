@@ -49,10 +49,11 @@ class VoteHandler : public ::testing::Test {
 protected:
     const ElectionTimer::Clock::time_point now{};
     ElectionTimer timer{200ms, 200ms, now};
-    VoteState state{5, std::nullopt, 10, 3};
-    Role role{Role::Follower};
+    TermVoteState state{5, std::nullopt};
+    LogState log_state{10, 3};
+    LeadershipState leadership;
     RequestVoteResponse vote(RequestVoteRequest request) {
-        return voteFor(request, state, role, timer, now + 100ms);
+        return voteFor(request, state, log_state, leadership, timer, now + 100ms);
     }
 };
 
@@ -74,12 +75,13 @@ TEST_F(VoteHandler, GrantsVoteResetsTimerAndAllowsSameCandidateRetry) {
 
 TEST_F(VoteHandler, HigherTermStepsDownAndClearsPreviousVote) {
     for (auto previous : {Role::Candidate, Role::Leader}) {
-        state = {5, 7, 10, 3};
-        role = previous;
+        state = {5, 7};
+        log_state = {10, 3};
+        leadership.role = previous;
         const auto result = vote({6, 2, 10, 3});
         EXPECT_TRUE(result.vote_granted);
         EXPECT_EQ(result.term, 6u);
-        EXPECT_EQ(role, Role::Follower);
+        EXPECT_EQ(leadership.role, Role::Follower);
         EXPECT_EQ(state.voted_for, 2u);
     }
 }
@@ -93,12 +95,12 @@ TEST_F(VoteHandler, RejectsStaleLogEvenWhenItsIndexIsLarger) {
 }
 
 TEST_F(VoteHandler, HigherTermWithStaleLogStillUpdatesTermButDoesNotResetTimer) {
-    role = Role::Leader;
+    leadership.role = Role::Leader;
     state.voted_for = 7;
     const auto result = vote({6, 2, 9, 3});
     EXPECT_FALSE(result.vote_granted);
     EXPECT_EQ(result.term, 6u);
-    EXPECT_EQ(role, Role::Follower);
+    EXPECT_EQ(leadership.role, Role::Follower);
     EXPECT_FALSE(state.voted_for.has_value());
     EXPECT_EQ(timer.remaining(now + 100ms), 100ms);
 }

@@ -48,56 +48,63 @@ class HeartbeatHandler : public ::testing::Test {
 protected:
     const ElectionTimer::Clock::time_point now{};
     ElectionTimer timer{200ms, 200ms, now};
-    VoteState state{5, 1, 0, 0};
-    Role role{Role::Candidate};
+    TermVoteState state{5, 1};
+    LogState log_state;
+    CommitState commit_state;
+    LeadershipState leadership{Role::Candidate, std::nullopt};
     std::vector<LogEntry> log;
 };
 
 TEST_F(HeartbeatHandler, CurrentTermLeaderStepsCandidateDownAndResetsTimer) {
-    const auto result = handle_heartbeat({5, 2, 0, 0, 0}, state, role, timer, log, now + 100ms);
+    const auto result = handle_heartbeat({5, 2, 0, 0, 0},
+        state, log_state, commit_state, leadership, timer, log, now + 100ms);
     EXPECT_TRUE(result.response.success);
-    EXPECT_EQ(role, Role::Follower);
-    EXPECT_EQ(state.leader_id, 2u);
+    EXPECT_EQ(leadership.role, Role::Follower);
+    EXPECT_EQ(leadership.leader_id, 2u);
     EXPECT_EQ(state.voted_for, 1u);
     EXPECT_EQ(timer.remaining(now + 100ms), 200ms);
 }
 
 TEST_F(HeartbeatHandler, HigherTermUpdatesStateAndClearsVote) {
-    const auto result = handle_heartbeat({6, 2, 0, 0, 0}, state, role, timer, log, now + 100ms);
+    const auto result = handle_heartbeat({6, 2, 0, 0, 0},
+        state, log_state, commit_state, leadership, timer, log, now + 100ms);
     EXPECT_TRUE(result.response.success);
     EXPECT_EQ(result.response.term, 6u);
     EXPECT_FALSE(state.voted_for.has_value());
-    EXPECT_EQ(role, Role::Follower);
+    EXPECT_EQ(leadership.role, Role::Follower);
 }
 
 TEST_F(HeartbeatHandler, StaleHeartbeatDoesNotChangeRoleOrResetTimer) {
-    const auto result = handle_heartbeat({4, 2, 0, 0, 0}, state, role, timer, log, now + 100ms);
+    const auto result = handle_heartbeat({4, 2, 0, 0, 0},
+        state, log_state, commit_state, leadership, timer, log, now + 100ms);
     EXPECT_FALSE(result.response.success);
     EXPECT_EQ(result.response.term, 5u);
-    EXPECT_EQ(role, Role::Candidate);
-    EXPECT_FALSE(state.leader_id.has_value());
+    EXPECT_EQ(leadership.role, Role::Candidate);
+    EXPECT_FALSE(leadership.leader_id.has_value());
     EXPECT_EQ(timer.remaining(now + 100ms), 100ms);
 }
 
 TEST_F(HeartbeatHandler, LogMismatchStillResetsElectionTimerButDoesNotCommit) {
-    state.last_log_index = 10;
-    state.last_log_term = 3;
+    log_state.last_log_index = 10;
+    log_state.last_log_term = 3;
     for (std::uint64_t i = 1; i <= 10; ++i) log.push_back({i, 3, "command"});
-    const auto result = handle_heartbeat({5, 2, 10, 2, 10}, state, role, timer, log, now + 100ms);
+    const auto result = handle_heartbeat({5, 2, 10, 2, 10},
+        state, log_state, commit_state, leadership, timer, log, now + 100ms);
     EXPECT_FALSE(result.response.success);
-    EXPECT_EQ(role, Role::Follower);
+    EXPECT_EQ(leadership.role, Role::Follower);
     EXPECT_EQ(timer.remaining(now + 100ms), 200ms);
-    EXPECT_EQ(state.commit_index, 0u);
+    EXPECT_EQ(commit_state.commit_index, 0u);
 }
 
 TEST_F(HeartbeatHandler, EmptyAppendEntriesCommitIsBoundedByMatchedIndex) {
-    state.last_log_index = 10;
-    state.last_log_term = 3;
+    log_state.last_log_index = 10;
+    log_state.last_log_term = 3;
     for (std::uint64_t i = 1; i <= 10; ++i) log.push_back({i, 3, "command"});
-    EXPECT_TRUE(handle_heartbeat({5, 2, 10, 3, 20}, state, role, timer, log, now).response.success);
-    EXPECT_EQ(state.commit_index, 10u);
-    handle_heartbeat({5, 2, 10, 3, 1}, state, role, timer, log, now);
-    EXPECT_EQ(state.commit_index, 10u);
+    EXPECT_TRUE(handle_heartbeat({5, 2, 10, 3, 20},
+        state, log_state, commit_state, leadership, timer, log, now).response.success);
+    EXPECT_EQ(commit_state.commit_index, 10u);
+    handle_heartbeat({5, 2, 10, 3, 1}, state, log_state, commit_state, leadership, timer, log, now);
+    EXPECT_EQ(commit_state.commit_index, 10u);
 }
 
 TEST(HeartbeatRpc, RoundTripsBinaryEntriesAndRejectsMalformedSequences) {
@@ -133,46 +140,49 @@ TEST(HeartbeatRpc, RoundTripsBinaryEntriesAndRejectsMalformedSequences) {
 
 TEST_F(HeartbeatHandler, MatchesInteriorPredecessorAndRepairsOnlyConflictingSuffix) {
     log = {{1, 1, "one"}, {2, 2, "old"}, {3, 2, "old tail"}};
-    state.last_log_index = 3;
-    state.last_log_term = 2;
-    const auto result = handle_heartbeat({5, 2, 1, 1, 10, {{2, 4, "new"}}}, state, role, timer, log, now);
+    log_state.last_log_index = 3;
+    log_state.last_log_term = 2;
+    const auto result = handle_heartbeat({5, 2, 1, 1, 10, {{2, 4, "new"}}},
+        state, log_state, commit_state, leadership, timer, log, now);
     EXPECT_TRUE(result.response.success);
     EXPECT_EQ(result.changed_from, 2u);
     ASSERT_EQ(log.size(), 2u);
     EXPECT_EQ(log[0].command, "one");
     EXPECT_EQ(log[1].command, "new");
-    EXPECT_EQ(state.last_log_index, 2u);
-    EXPECT_EQ(state.last_log_term, 4u);
-    EXPECT_EQ(state.commit_index, 2u);
+    EXPECT_EQ(log_state.last_log_index, 2u);
+    EXPECT_EQ(log_state.last_log_term, 4u);
+    EXPECT_EQ(commit_state.commit_index, 2u);
 }
 
 TEST_F(HeartbeatHandler, DuplicateAndShorterRequestsPreserveMatchingExtraSuffix) {
     log = {{1, 1, "one"}, {2, 2, "two"}, {3, 3, "three"}};
     const HeartbeatRequest request{5, 2, 1, 1, 10, {{2, 2, "two"}}};
     for (int i = 0; i < 2; ++i) {
-        const auto result = handle_heartbeat(request, state, role, timer, log, now);
+        const auto result = handle_heartbeat(request, state, log_state, commit_state, leadership, timer, log, now);
         EXPECT_TRUE(result.response.success);
         EXPECT_FALSE(result.changed_from);
         EXPECT_EQ(log.size(), 3u);
-        EXPECT_EQ(state.commit_index, 2u);
+        EXPECT_EQ(commit_state.commit_index, 2u);
     }
-    const auto heartbeat = handle_heartbeat({5, 2, 0, 0, 10}, state, role, timer, log, now);
+    const auto heartbeat = handle_heartbeat({5, 2, 0, 0, 10},
+        state, log_state, commit_state, leadership, timer, log, now);
     EXPECT_TRUE(heartbeat.response.success);
     EXPECT_EQ(log.size(), 3u);
-    EXPECT_EQ(state.commit_index, 2u);
+    EXPECT_EQ(commit_state.commit_index, 2u);
 }
 
 TEST_F(HeartbeatHandler, RejectsCommittedConflictsAndSameTermCommandMismatch) {
     log = {{1, 1, "one"}, {2, 2, "two"}};
-    state.commit_index = 2;
+    commit_state.commit_index = 2;
     EXPECT_FALSE(handle_heartbeat({5, 2, 1, 1, 2, {{2, 4, "replace"}}},
-        state, role, timer, log, now).response.success);
+        state, log_state, commit_state, leadership, timer, log, now).response.success);
     EXPECT_EQ(log[1].command, "two");
-    state.commit_index = 0;
+    commit_state.commit_index = 0;
     EXPECT_FALSE(handle_heartbeat({5, 2, 1, 1, 0, {{2, 2, "different"}}},
-        state, role, timer, log, now).response.success);
+        state, log_state, commit_state, leadership, timer, log, now).response.success);
     EXPECT_EQ(log[1].command, "two");
-    EXPECT_FALSE(handle_heartbeat({5, 2, 3, 2, 0}, state, role, timer, log, now).response.success);
+    EXPECT_FALSE(handle_heartbeat({5, 2, 3, 2, 0},
+        state, log_state, commit_state, leadership, timer, log, now).response.success);
 }
 
 TEST(LogReplication, BacksOffThenAdvancesOnlyThroughAcknowledgedEntries) {
@@ -275,17 +285,18 @@ TEST(HeartbeatPeerRpc, ExchangesHeartbeatBetweenServerSockets) {
 
 TEST(HeartbeatTermObservation, HigherTermReplyStepsLeaderDownAndClearsVote) {
     NodeConfig config;
-    VoteState state;
-    Role role{Role::Follower};
-    Election election{config, state, role};
+    TermVoteState state;
+    LogState log_state;
+    LeadershipState leadership;
+    Election election{config, state, log_state, leadership};
     election.start();
-    ASSERT_EQ(role, Role::Leader);
+    ASSERT_EQ(leadership.role, Role::Leader);
     EXPECT_FALSE(election.become_follower_if_higher_term(1));
     EXPECT_TRUE(election.become_follower_if_higher_term(2));
-    EXPECT_EQ(role, Role::Follower);
+    EXPECT_EQ(leadership.role, Role::Follower);
     EXPECT_EQ(state.current_term, 2u);
     EXPECT_FALSE(state.voted_for.has_value());
-    EXPECT_FALSE(state.leader_id.has_value());
+    EXPECT_FALSE(leadership.leader_id.has_value());
 }
 } // namespace
 } // namespace zmq_template::server

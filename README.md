@@ -147,7 +147,7 @@ src/
   server/heartbeat.hpp         # 心跳定时器与日志匹配处理
   server/commit_index.hpp      # 当前任期多数提交规则
   server/state_machine/key_value_state_machine.hpp # 顺序应用的键值状态机
-  server/storage/commit_storage.hpp  # 提交位置的持久化与恢复
+  server/storage/raft_state_storage.hpp  # 任期、投票与提交位置的持久化和恢复
   server/election_timer.hpp    # 随机选举定时器，使用单调时钟
   client/main.cpp              # REQ 客户端
   common/message.hpp           # 双方共用的 Message 结构体、类型和协议声明
@@ -357,7 +357,7 @@ Leader 为每个 Follower 维护 `next_index` 和 `match_index`。拒绝时回�
 `1 MiB - 48 - 24` 字节；超大本地条目无法发送，节点进入 Leader 发送流程时会报错退出。
 只使用当前领导任期的响应更新进度；更高任期响应使 Leader 退位并持久化新任期。
 
-业务命令通过日志复制、多数提交和状态机应用后回复。提交索引由 `CommitStorage` 持久化，
+业务命令通过日志复制、多数提交和状态机应用后回复。提交索引由 `RaftStateStorage::save_commit()` 持久化，
 重启后恢复已提交边界，继续保护已提交前缀不被冲突日志覆盖。
 
 ```sh
@@ -396,8 +396,8 @@ SPDLOG_LEVEL=debug ./scripts/start_demo.sh --nodes 3 --no-build
 
 ## 任期与投票持久化
 
-服务端使用 `src/server/storage/state_storage.hpp/.cpp` 中的 `StateStorage`，
-通过 `load()` / `save()` 整体读写 `PersistentState`，包括当前任期和本任期投给的节点 ID。
+服务端使用 `src/server/storage/raft_state_storage.hpp/.cpp` 中的 `RaftStateStorage`，
+通过 `load_term_vote()` / `save_term_vote()` 整体读写 `TermVoteState`，包括当前任期和本任期投给的节点 ID。
 该实现使用 Linux/POSIX 文件系统接口；当前不提供 Windows 存储后端。
 
 ```sh
@@ -458,10 +458,12 @@ SPDLOG_LEVEL=debug ./scripts/start_demo.sh --nodes 3 --no-build
 
 ```cpp
 auto directory = std::make_shared<StorageDirectory>("./data/node-1");
-StateStorage state{directory};
+RaftStateStorage state{directory};
 LogStorage log{directory};
-state.save({1, std::nullopt});
+state.save_term_vote({1, std::nullopt});
 log.append({{1, 1, "SET key value"}, {2, 1, "DEL key"}});
+state.save_commit({1, 1});
+auto committed = state.load_commit();
 auto entries = log.load();
 log.truncate_suffix(2); // 删除索引 >= 2 的后缀，保留索引 1
 ```
@@ -480,7 +482,7 @@ log.truncate_suffix(2); // 删除索引 >= 2 的后缀，保留索引 1
 
 ## 提交位置与状态机恢复
 
-`CommitStorage` 与任期/投票、日志存储共享目录锁。`commit.json` 的 `format` 为 `raft-commit`，
+`RaftStateStorage` 同时提供 `load_commit()` / `save_commit()`，与日志存储共享目录锁。`commit.json` 的 `format` 为 `raft-commit`，
 `data` 包含提交索引 `index` 和对应日志任期 `term`。
 提交位置只向前推进；启动时校验其索引和任期与日志一致，损坏或日志缺失时拒绝启动。
 缺少检查点的旧数据目录从提交索引 0 开始，不把仅已落盘的日志误认为已提交。

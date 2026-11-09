@@ -35,9 +35,10 @@ struct server::Runtime {
         ElectionTimer::Clock::time_point deadline;
         std::optional<std::string> result;
     };
-    explicit Runtime(const NodeConfig& config, VoteState& state, Role& role)
+    explicit Runtime(const NodeConfig& config, TermVoteState& state, const LogState& log_state,
+                     LeadershipState& leadership)
         : election_timer(config.election_timeout_min, config.election_timeout_max),
-          election(config, state, role), heartbeat_timer(config.heartbeat_interval) {}
+          election(config, state, log_state, leadership), heartbeat_timer(config.heartbeat_interval) {}
 
     // Keep context before sockets so it is destroyed after all connections.
     zmq::context_t context{1};
@@ -61,23 +62,23 @@ server::server(NodeConfig config)
           ? std::filesystem::read_symlink("/proc/self/exe").parent_path()
               / "data" / ("node-" + std::to_string(config_.id))
           : config_.data_dir)),
-      state_storage_(storage_directory_), log_storage_(storage_directory_), commit_storage_(storage_directory_) {}
+      state_storage_(storage_directory_), log_storage_(storage_directory_) {}
 
 void server::persist_state() {
-    const PersistentState next{vote_state_.current_term, vote_state_.voted_for};
+    const auto& next = term_vote_state_;
     if (next.current_term == persisted_state_.current_term
         && next.voted_for == persisted_state_.voted_for) return;
-    state_storage_.save(next);
+    state_storage_.save_term_vote(next);
     persisted_state_ = next;
 }
 
 void server::persist_commit_and_apply(Runtime& runtime) {
-    if (vote_state_.commit_index > persisted_commit_.index) {
-        const PersistentCommit next{vote_state_.commit_index, runtime.log.at(vote_state_.commit_index - 1).term};
-        commit_storage_.save(next);
+    if (commit_state_.commit_index > persisted_commit_.index) {
+        const PersistentCommit next{commit_state_.commit_index, runtime.log.at(commit_state_.commit_index - 1).term};
+        state_storage_.save_commit(next);
         persisted_commit_ = next;
     }
-    const auto applied = runtime.machine.apply_committed(runtime.log, vote_state_.commit_index);
+    const auto applied = runtime.machine.apply_committed(runtime.log, commit_state_.commit_index);
     for (const auto& result : applied) {
         for (auto& pending : runtime.pending) {
             if (pending.index == result.index && pending.term == runtime.log[result.index - 1].term) {
@@ -88,11 +89,11 @@ void server::persist_commit_and_apply(Runtime& runtime) {
 }
 
 void server::advance_commit(Runtime& runtime) {
-    if (role_ != Role::Leader || !runtime.leader_active) return;
+    if (leadership_.role != Role::Leader || !runtime.leader_active) return;
     std::vector<std::uint64_t> matches;
     for (const auto& peer : runtime.peers) matches.push_back(runtime.replication.at(peer.id()).match_index());
-    vote_state_.commit_index = majority_commit_index(runtime.log, vote_state_.current_term,
-        vote_state_.commit_index, std::move(matches));
+    commit_state_.commit_index = majority_commit_index(runtime.log, term_vote_state_.current_term,
+        commit_state_.commit_index, std::move(matches));
     persist_commit_and_apply(runtime);
 }
 
@@ -104,7 +105,7 @@ void server::complete_pending(Runtime& runtime) {
         if (pending->result) {
             response.type = MessageType::acknowledgement;
             response.payload = *pending->result;
-        } else if (role_ != Role::Leader || pending->term != vote_state_.current_term) {
+        } else if (leadership_.role != Role::Leader || pending->term != term_vote_state_.current_term) {
             response.payload = "Leadership changed; outcome unknown. Retrying may execute the command again.";
         } else if (now >= pending->deadline) {
             response.payload = "Commit timed out; outcome unknown. Retrying may execute the command again.";
@@ -128,30 +129,30 @@ int server::wait_util_stop() {
 
 std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     stop_requested = 0;
-    persisted_state_ = state_storage_.load();
-    vote_state_ = {};
-    vote_state_.current_term = persisted_state_.current_term;
-    vote_state_.voted_for = persisted_state_.voted_for;
+    persisted_state_ = state_storage_.load_term_vote();
+    term_vote_state_ = persisted_state_;
+    log_state_ = {};
+    commit_state_ = {};
+    leadership_ = {};
     auto log = log_storage_.load();
     if (!log.empty()) {
-        vote_state_.last_log_index = log.back().index;
-        vote_state_.last_log_term = log.back().term;
-        if (vote_state_.last_log_term > vote_state_.current_term) {
+        log_state_.last_log_index = log.back().index;
+        log_state_.last_log_term = log.back().term;
+        if (log_state_.last_log_term > term_vote_state_.current_term) {
             throw StorageError("Persistent log term exceeds current term");
         }
     }
-    role_ = Role::Follower;
     spdlog::info("Recovered persistent state term={} voted_for={}",
-                 vote_state_.current_term, vote_state_.voted_for.value_or(0));
-    auto runtime = std::make_unique<Runtime>(config, vote_state_, role_);
+                 term_vote_state_.current_term, term_vote_state_.voted_for.value_or(0));
+    auto runtime = std::make_unique<Runtime>(config, term_vote_state_, log_state_, leadership_);
     runtime->log = std::move(log);
-    persisted_commit_ = commit_storage_.load();
+    persisted_commit_ = state_storage_.load_commit();
     if (persisted_commit_.index > runtime->log.size()
         || (persisted_commit_.index != 0 && runtime->log[persisted_commit_.index - 1].term != persisted_commit_.term)) {
         throw StorageError("Committed checkpoint does not match the persistent log");
     }
-    vote_state_.commit_index = persisted_commit_.index;
-    runtime->machine.apply_committed(runtime->log, vote_state_.commit_index);
+    commit_state_.commit_index = persisted_commit_.index;
+    runtime->machine.apply_committed(runtime->log, commit_state_.commit_index);
     zmq_template::configure_socket(runtime->socket);
     // Poll owns the wait; a slow/disconnected peer must not block elections.
     runtime->socket.set(zmq::sockopt::rcvtimeo, 0);
@@ -164,7 +165,7 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     spdlog::info("Listening on {} node={} role={} election_timeout={}ms election_range=[{},{}]ms "
                  "heartbeat_interval={}ms heartbeat_timeout={}ms",
                  runtime->socket.get(zmq::sockopt::last_endpoint), config.id,
-                 to_string(role_), runtime->election_timer.timeout().count(),
+                 to_string(leadership_.role), runtime->election_timer.timeout().count(),
                  config.election_timeout_min.count(), config.election_timeout_max.count(),
                  config.heartbeat_interval.count(), config.heartbeat_timeout.count());
     return runtime;
@@ -187,14 +188,15 @@ void server::handle_request(Runtime& runtime) {
         response.id = message.id;
         if (message.type == zmq_template::MessageType::request_vote) {
             const auto request = zmq_template::decode_vote_request(message);
-            const auto result = voteFor(request, vote_state_, role_, runtime.election_timer);
+            const auto result = voteFor(request, term_vote_state_, log_state_, leadership_, runtime.election_timer);
             persist_state();
             response = zmq_template::make_vote_response(message.id, result);
             spdlog::info("RequestVote candidate={} request_term={} current_term={} granted={} role={}",
-                         request.candidate_id, request.term, result.term, result.vote_granted, to_string(role_));
+                         request.candidate_id, request.term, result.term, result.vote_granted, to_string(leadership_.role));
         } else if (message.type == zmq_template::MessageType::heartbeat) {
             const auto request = zmq_template::decode_heartbeat_request(message);
-            const auto result = handle_heartbeat(request, vote_state_, role_, runtime.election_timer, runtime.log);
+            const auto result = handle_heartbeat(request, term_vote_state_, log_state_, commit_state_,
+                leadership_, runtime.election_timer, runtime.log);
             persist_state(); // A higher term must be durable before logs from that term.
             if (result.changed_from) {
                 const auto first = runtime.log.begin() + static_cast<std::size_t>(*result.changed_from - 1);
@@ -205,10 +207,10 @@ void server::handle_request(Runtime& runtime) {
             spdlog::debug("Heartbeat received leader={} term={} success={}",
                           request.leader_id, request.term, result.response.success);
         } else if (message.type == zmq_template::MessageType::text) {
-            if (role_ != Role::Leader || !runtime.leader_active
-                || runtime.heartbeat_term != vote_state_.current_term) {
-                throw std::invalid_argument(vote_state_.leader_id
-                    ? "Not leader; known leader ID=" + std::to_string(*vote_state_.leader_id)
+            if (leadership_.role != Role::Leader || !runtime.leader_active
+                || runtime.heartbeat_term != term_vote_state_.current_term) {
+                throw std::invalid_argument(leadership_.leader_id
+                    ? "Not leader; known leader ID=" + std::to_string(*leadership_.leader_id)
                     : "Not leader; leader unknown");
             }
             KeyValueStateMachine::validate_command(message.payload);
@@ -216,11 +218,11 @@ void server::handle_request(Runtime& runtime) {
                 throw std::invalid_argument("Command is too large for AppendEntries");
             }
             if (runtime.pending.size() >= 1024) throw std::invalid_argument("Too many pending commands");
-            const LogEntry entry{vote_state_.last_log_index + 1, vote_state_.current_term, message.payload};
+            const LogEntry entry{log_state_.last_log_index + 1, term_vote_state_.current_term, message.payload};
             log_storage_.append({entry});
             runtime.log.push_back(entry);
-            vote_state_.last_log_index = entry.index;
-            vote_state_.last_log_term = entry.term;
+            log_state_.last_log_index = entry.index;
+            log_state_.last_log_term = entry.term;
             runtime.pending.push_back({route, message.id, entry.index, entry.term,
                 ElectionTimer::Clock::now() + std::chrono::seconds{2}, std::nullopt});
             advance_commit(runtime);
@@ -248,8 +250,8 @@ void server::handle_peer_response(Runtime& runtime, PeerRpc& peer) {
                 runtime.election_timer.reset();
                 spdlog::info("Higher heartbeat response term={}; stepping down to Follower", response.term);
             }
-            if (role_ == Role::Leader && request_term == vote_state_.current_term
-                && response.term == vote_state_.current_term && runtime.leader_active) {
+            if (leadership_.role == Role::Leader && request_term == term_vote_state_.current_term
+                && response.term == term_vote_state_.current_term && runtime.leader_active) {
                 runtime.replication.at(peer.id()).acknowledge(response.success);
                 advance_commit(runtime);
             }
@@ -257,16 +259,16 @@ void server::handle_peer_response(Runtime& runtime, PeerRpc& peer) {
                           peer.id(), response.term, response.success);
         } else if (peer.request_type() == zmq_template::MessageType::request_vote) {
             const auto response = peer.receive_vote_response();
-            const auto previous_term = vote_state_.current_term;
-            const auto previous_role = role_;
+            const auto previous_term = term_vote_state_.current_term;
+            const auto previous_role = leadership_.role;
             runtime.election.handle_vote_response(peer.id(), request_term, response);
             persist_state();
-            if (vote_state_.current_term > previous_term) runtime.election_timer.reset();
+            if (term_vote_state_.current_term > previous_term) runtime.election_timer.reset();
             spdlog::info("voteFor peer={} term={} granted={} votes={}/{} role={}",
                          peer.id(), response.term, response.vote_granted,
-                         runtime.election.votes(), runtime.election.majority(), to_string(role_));
-            if (previous_role != Role::Leader && role_ == Role::Leader) {
-                spdlog::info("Node {} elected Leader term={}", config_.id, vote_state_.current_term);
+                         runtime.election.votes(), runtime.election.majority(), to_string(leadership_.role));
+            if (previous_role != Role::Leader && leadership_.role == Role::Leader) {
+                spdlog::info("Node {} elected Leader term={}", config_.id, term_vote_state_.current_term);
             }
         } else {
             throw std::logic_error("Unsupported pending RPC type");
@@ -313,35 +315,35 @@ void server::start_election(Runtime& runtime) {
             spdlog::warn("RequestVote send peer={} failed: {}", peer.id(), error.what());
         }
     }
-    if (role_ == Role::Leader) {
-        spdlog::info("Node {} elected Leader term={}", config_.id, vote_state_.current_term);
+    if (leadership_.role == Role::Leader) {
+        spdlog::info("Node {} elected Leader term={}", config_.id, term_vote_state_.current_term);
         tick_leader(runtime);
     }
 }
 
 void server::tick_leader(Runtime& runtime) {
-    if (!runtime.leader_active || runtime.heartbeat_term != vote_state_.current_term) {
+    if (!runtime.leader_active || runtime.heartbeat_term != term_vote_state_.current_term) {
         // Replace any outstanding election RPCs with immediate leader contact.
         for (auto& peer : runtime.peers) {
             peer.cancel();
-            runtime.replication[peer.id()].reset(vote_state_.last_log_index);
+            runtime.replication[peer.id()].reset(log_state_.last_log_index);
         }
         // Persist a current-term no-op before replication; never commit an old term by counting it alone.
-        const LogEntry noop{vote_state_.last_log_index + 1, vote_state_.current_term, {}};
+        const LogEntry noop{log_state_.last_log_index + 1, term_vote_state_.current_term, {}};
         log_storage_.append({noop});
         runtime.log.push_back(noop);
-        vote_state_.last_log_index = noop.index;
-        vote_state_.last_log_term = noop.term;
+        log_state_.last_log_index = noop.index;
+        log_state_.last_log_term = noop.term;
         runtime.heartbeat_timer.restart();
         runtime.leader_active = true;
-        runtime.heartbeat_term = vote_state_.current_term;
+        runtime.heartbeat_term = term_vote_state_.current_term;
         advance_commit(runtime);
     }
     if (runtime.heartbeat_timer.tick()) {
         for (auto& peer : runtime.peers) {
             if (peer.pending()) continue;
             const auto request = runtime.replication.at(peer.id()).make_request(runtime.log,
-                vote_state_.current_term, config_.id, vote_state_.commit_index);
+                term_vote_state_.current_term, config_.id, commit_state_.commit_index);
             try {
                 peer.requestHeartbeat(request, ++runtime.next_rpc_id);
                 spdlog::debug("Heartbeat sent peer={} term={}", peer.id(), request.term);
@@ -356,10 +358,10 @@ void server::tick_leader(Runtime& runtime) {
 int server::run(const NodeConfig& config) {
     auto runtime = initialize(config);
     while (!stop_requested) {
-        auto wait = role_ == Role::Leader ? std::chrono::milliseconds{100}
+        auto wait = leadership_.role == Role::Leader ? std::chrono::milliseconds{100}
             : std::min(runtime->election_timer.remaining(), std::chrono::milliseconds{100});
-        if (role_ == Role::Leader) {
-            wait = runtime->leader_active && runtime->heartbeat_term == vote_state_.current_term
+        if (leadership_.role == Role::Leader) {
+            wait = runtime->leader_active && runtime->heartbeat_term == term_vote_state_.current_term
                 ? std::min(wait, runtime->heartbeat_timer.remaining()) : std::chrono::milliseconds{0};
         }
         std::vector<zmq::pollitem_t> items{{runtime->socket.handle(), 0, ZMQ_POLLIN, 0}};
@@ -385,7 +387,7 @@ int server::run(const NodeConfig& config) {
             handle_peer_response(*runtime, runtime->peers[polled_peers[i]]);
         }
         process_peer_timeouts(*runtime);
-        switch (role_) {
+        switch (leadership_.role) {
         case Role::Follower:
             tick_follower(*runtime);
             break;

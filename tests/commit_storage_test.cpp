@@ -1,4 +1,4 @@
-#include "server/storage/commit_storage.hpp"
+#include "server/storage/raft_state_storage.hpp"
 
 #include "storage_test_helpers.hpp"
 
@@ -28,53 +28,53 @@ protected:
 TEST_F(CommitStorageTest, RecoversMonotonicCheckpointAndRejectsInvalidTransitions) {
     {
         auto shared = std::make_shared<StorageDirectory>(directory);
-        CommitStorage storage{shared};
-        EXPECT_EQ(storage.load().index, 0u);
-        storage.save({2, 3});
-        EXPECT_THROW(storage.save({1, 3}), StorageError);
-        EXPECT_THROW(storage.save({2, 4}), StorageError);
-        EXPECT_THROW(storage.save({3, 2}), StorageError);
-        EXPECT_THROW(storage.save({0, 1}), StorageError);
+        RaftStateStorage storage{shared};
+        EXPECT_EQ(storage.load_commit().index, 0u);
+        storage.save_commit({2, 3});
+        EXPECT_THROW(storage.save_commit({1, 3}), StorageError);
+        EXPECT_THROW(storage.save_commit({2, 4}), StorageError);
+        EXPECT_THROW(storage.save_commit({3, 2}), StorageError);
+        EXPECT_THROW(storage.save_commit({0, 1}), StorageError);
     }
-    CommitStorage recovered{std::make_shared<StorageDirectory>(directory)};
-    EXPECT_EQ(recovered.load().index, 2u);
-    EXPECT_EQ(recovered.load().term, 3u);
-    recovered.save({4, 5});
-    EXPECT_EQ(recovered.load().index, 4u);
+    RaftStateStorage recovered{std::make_shared<StorageDirectory>(directory)};
+    EXPECT_EQ(recovered.load_commit().index, 2u);
+    EXPECT_EQ(recovered.load_commit().term, 3u);
+    recovered.save_commit({4, 5});
+    EXPECT_EQ(recovered.load_commit().index, 4u);
 }
 
 TEST_F(CommitStorageTest, FailedWritePreservesOldCheckpointAndCorruptionIsFatal) {
-    CommitStorage storage{std::make_shared<StorageDirectory>(directory)};
-    storage.save({2, 3});
+    RaftStateStorage storage{std::make_shared<StorageDirectory>(directory)};
+    storage.save_commit({2, 3});
     std::filesystem::create_directory(directory / "commit.tmp");
-    EXPECT_THROW(storage.save({3, 4}), StorageError);
-    EXPECT_EQ(storage.load().index, 2u);
+    EXPECT_THROW(storage.save_commit({3, 4}), StorageError);
+    EXPECT_EQ(storage.load_commit().index, 2u);
     std::ofstream{directory / "commit.json", std::ios::binary | std::ios::trunc} << "partial";
-    EXPECT_THROW(storage.load(), StorageError);
-    EXPECT_THROW(storage.save({3, 4}), StorageError);
+    EXPECT_THROW(storage.load_commit(), StorageError);
+    EXPECT_THROW(storage.save_commit({3, 4}), StorageError);
 }
 
 TEST_F(CommitStorageTest, WritesFullWidthJsonCheckpoint) {
-    CommitStorage storage{std::make_shared<StorageDirectory>(directory)};
+    RaftStateStorage storage{std::make_shared<StorageDirectory>(directory)};
     const auto maximum = std::numeric_limits<std::uint64_t>::max();
-    storage.save({maximum, maximum});
+    storage.save_commit({maximum, maximum});
     const auto record = test::read_json(directory / "commit.json");
     EXPECT_EQ(record.at("format"), "raft-commit");
     EXPECT_EQ(record.at("data").at("index").get<std::uint64_t>(), maximum);
-    EXPECT_EQ(storage.load().index, maximum);
-    EXPECT_EQ(storage.load().term, maximum);
+    EXPECT_EQ(storage.load_commit().index, maximum);
+    EXPECT_EQ(storage.load_commit().term, maximum);
     std::ofstream{directory / "commit.json"} << "partial";
-    EXPECT_THROW(storage.load(), StorageError);
+    EXPECT_THROW(storage.load_commit(), StorageError);
 }
 
 TEST_F(CommitStorageTest, RejectsInvalidJsonCheckpoint) {
-    CommitStorage storage{std::make_shared<StorageDirectory>(directory)};
-    storage.save({2, 3});
+    RaftStateStorage storage{std::make_shared<StorageDirectory>(directory)};
+    storage.save_commit({2, 3});
     auto record = test::read_json(directory / "commit.json");
     record["data"]["term"] = 0;
     test::write_json(directory / "commit.json", record);
-    EXPECT_THROW(storage.load(), StorageError);
-    EXPECT_THROW(storage.save({3, 4}), StorageError);
+    EXPECT_THROW(storage.load_commit(), StorageError);
+    EXPECT_THROW(storage.save_commit({3, 4}), StorageError);
 }
 } // namespace
 } // namespace zmq_template::server

@@ -7,25 +7,25 @@
 namespace zmq_template::server {
 
 inline RequestVoteResponse voteFor(
-    const RequestVoteRequest& request, VoteState& state, Role& current_role,
-    ElectionTimer& timer, ElectionTimer::Clock::time_point now = ElectionTimer::Clock::now()) {
-    if (request.term < state.current_term) return {state.current_term, false};
-    if (request.term > state.current_term) {
-        state.current_term = request.term;
-        state.voted_for.reset();
-        state.leader_id.reset();
-        current_role = Role::Follower;
+    const RequestVoteRequest& request, TermVoteState& term_vote, const LogState& log_state,
+    LeadershipState& leadership, ElectionTimer& timer, ElectionTimer::Clock::time_point now = ElectionTimer::Clock::now()) {
+    if (request.term < term_vote.current_term) return {term_vote.current_term, false};
+    if (request.term > term_vote.current_term) {
+        term_vote.current_term = request.term;
+        term_vote.voted_for.reset();
+        leadership.leader_id.reset();
+        leadership.role = Role::Follower;
     }
-    const bool up_to_date = request.last_log_term > state.last_log_term
-        || (request.last_log_term == state.last_log_term
-            && request.last_log_index >= state.last_log_index);
-    const bool can_vote = !state.voted_for || *state.voted_for == request.candidate_id;
+    const bool up_to_date = request.last_log_term > log_state.last_log_term
+        || (request.last_log_term == log_state.last_log_term
+            && request.last_log_index >= log_state.last_log_index);
+    const bool can_vote = !term_vote.voted_for || *term_vote.voted_for == request.candidate_id;
     const bool granted = can_vote && up_to_date;
     if (granted) {
-        state.voted_for = request.candidate_id;
+        term_vote.voted_for = request.candidate_id;
         timer.reset(now);
     }
-    return {state.current_term, granted};
+    return {term_vote.current_term, granted};
 }
 
 } // namespace zmq_template::server

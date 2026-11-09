@@ -30,8 +30,7 @@ target_link_libraries(zmq_logging PUBLIC spdlog::spdlog)
 add_library(zmq_server_core
     src/server/server.cpp
     src/server/state_machine/key_value_state_machine.cpp
-    src/server/storage/state_storage.cpp
-    src/server/storage/commit_storage.cpp
+    src/server/storage/raft_state_storage.cpp
     src/server/storage/log_storage.cpp
     src/server/storage/storage_directory.cpp
     src/server/storage/json_record.cpp

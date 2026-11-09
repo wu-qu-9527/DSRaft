@@ -1,9 +1,8 @@
 #include "common/zmq_transport.hpp"
 #include "server/rpc/heartbeat_rpc.hpp"
 #include "server/rpc/vote_rpc.hpp"
-#include "server/storage/state_storage.hpp"
+#include "server/storage/raft_state_storage.hpp"
 #include "server/storage/log_storage.hpp"
-#include "server/storage/commit_storage.hpp"
 #include "server/state_machine/key_value_state_machine.hpp"
 
 #include <gtest/gtest.h>
@@ -132,10 +131,10 @@ TEST_F(PersistentServer, RecoveryReplaysOnlyCommittedPrefix) {
         {5, 2, 0, 0, 1, {{1, 4, "SET key committed"}, {2, 4, "SET key uncommitted"}}}))).success);
     process.reset();
     auto directory = std::make_shared<StorageDirectory>(data_dir);
-    CommitStorage commit{directory};
+    RaftStateStorage commit{directory};
     LogStorage log{directory};
     KeyValueStateMachine machine;
-    machine.apply_committed(log.load(), commit.load().index);
+    machine.apply_committed(log.load(), commit.load_commit().index);
     EXPECT_EQ(machine.last_applied(), 1u);
     EXPECT_EQ(machine.get("key"), "committed");
 }
@@ -149,19 +148,19 @@ TEST_F(PersistentServer, SingleNodeCommitsAnElectionNoop) {
     process.reset();
     auto directory = std::make_shared<StorageDirectory>(data_dir);
     LogStorage log{directory};
-    CommitStorage commit{directory};
+    RaftStateStorage commit{directory};
     ASSERT_EQ(log.load().size(), 1u);
     EXPECT_EQ(log.load()[0].term, 1u);
     EXPECT_TRUE(log.load()[0].command.empty());
-    EXPECT_EQ(commit.load().index, 1u);
+    EXPECT_EQ(commit.load_commit().index, 1u);
 }
 
 TEST_F(PersistentServer, DoesNotCommitUntilPeerConfirmsCurrentTermNoop) {
     {
         auto directory = std::make_shared<StorageDirectory>(data_dir);
-        StateStorage state{directory};
+        RaftStateStorage state{directory};
         LogStorage log{directory};
-        state.save({1, std::nullopt});
+        state.save_term_vote({1, std::nullopt});
         log.append({{1, 1, "SET key old"}});
     }
     zmq::context_t context{1};
@@ -186,8 +185,8 @@ TEST_F(PersistentServer, DoesNotCommitUntilPeerConfirmsCurrentTermNoop) {
     EXPECT_EQ(decode_heartbeat_request(incoming).leader_commit, 2u);
     send_message(peer, make_heartbeat_response(incoming.id, {2, true}));
     process.reset();
-    CommitStorage commit{std::make_shared<StorageDirectory>(data_dir)};
-    EXPECT_EQ(commit.load().index, 2u);
+    RaftStateStorage commit{std::make_shared<StorageDirectory>(data_dir)};
+    EXPECT_EQ(commit.load_commit().index, 2u);
 }
 
 TEST_F(PersistentServer, RestoresCommittedBoundaryAndRejectsConflictingCommittedEntries) {
@@ -199,9 +198,9 @@ TEST_F(PersistentServer, RestoresCommittedBoundaryAndRejectsConflictingCommitted
         {6, 2, 0, 0, 1, {{1, 6, "SET key overwritten"}}}))).success);
     process.reset();
     auto directory = std::make_shared<StorageDirectory>(data_dir);
-    CommitStorage commit{directory};
+    RaftStateStorage commit{directory};
     LogStorage log{directory};
-    EXPECT_EQ(commit.load().index, 1u);
+    EXPECT_EQ(commit.load_commit().index, 1u);
     EXPECT_EQ(log.load()[0].command, "SET key committed");
 }
 
@@ -212,17 +211,16 @@ TEST_F(PersistentServer, CommitPersistenceFailureDoesNotAcknowledgeSuccess) {
     std::filesystem::create_directory(data_dir / "commit.tmp");
     EXPECT_THROW(call(make_heartbeat_request(2, {5, 2, 1, 4, 1})), std::runtime_error);
     EXPECT_EQ(process->wait_for_exit(), 1);
-    CommitStorage commit{std::make_shared<StorageDirectory>(data_dir)};
-    EXPECT_EQ(commit.load().index, 0u);
+    RaftStateStorage commit{std::make_shared<StorageDirectory>(data_dir)};
+    EXPECT_EQ(commit.load_commit().index, 0u);
 }
 
 TEST_F(PersistentServer, CheckpointBeyondLogRefusesStartup) {
     {
         auto directory = std::make_shared<StorageDirectory>(data_dir);
-        StateStorage state{directory};
-        CommitStorage commit{directory};
-        state.save({3, std::nullopt});
-        commit.save({1, 3});
+        RaftStateStorage state{directory};
+        state.save_term_vote({3, std::nullopt});
+        state.save_commit({1, 3});
     }
     start();
     EXPECT_EQ(process->wait_for_exit(), 1);
@@ -231,9 +229,9 @@ TEST_F(PersistentServer, CheckpointBeyondLogRefusesStartup) {
 TEST_F(PersistentServer, AppendEntriesRepairsConflictAndSurvivesAbruptRestart) {
     {
         auto directory = std::make_shared<StorageDirectory>(data_dir);
-        StateStorage state{directory};
+        RaftStateStorage state{directory};
         LogStorage log{directory};
-        state.save({3, std::nullopt});
+        state.save_term_vote({3, std::nullopt});
         log.append({{1, 1, "prefix"}, {2, 2, "conflict"}, {3, 2, "old tail"}});
     }
     start();
@@ -246,9 +244,9 @@ TEST_F(PersistentServer, AppendEntriesRepairsConflictAndSurvivesAbruptRestart) {
     EXPECT_FALSE(decode_vote_response(call(make_vote_request(3, {6, 3, 1, 4}))).vote_granted);
     process.reset();
     auto directory = std::make_shared<StorageDirectory>(data_dir);
-    StateStorage state{directory};
+    RaftStateStorage state{directory};
     LogStorage log{directory};
-    EXPECT_EQ(state.load().current_term, 6u);
+    EXPECT_EQ(state.load_term_vote().current_term, 6u);
     const auto entries = log.load();
     ASSERT_EQ(entries.size(), 2u);
     EXPECT_EQ(entries[0].command, "prefix");
@@ -259,9 +257,9 @@ TEST_F(PersistentServer, AppendEntriesRepairsConflictAndSurvivesAbruptRestart) {
 TEST_F(PersistentServer, FailedLogReplacementDoesNotReplySuccessOrLosePreviousLog) {
     {
         auto directory = std::make_shared<StorageDirectory>(data_dir);
-        StateStorage state{directory};
+        RaftStateStorage state{directory};
         LogStorage log{directory};
-        state.save({3, std::nullopt});
+        state.save_term_vote({3, std::nullopt});
         log.append({{1, 2, "old"}});
     }
     std::filesystem::create_directory(data_dir / "log.tmp");
@@ -269,9 +267,9 @@ TEST_F(PersistentServer, FailedLogReplacementDoesNotReplySuccessOrLosePreviousLo
     EXPECT_THROW(call(make_heartbeat_request(1, {5, 2, 0, 0, 0, {{1, 4, "new"}}})), std::runtime_error);
     EXPECT_EQ(process->wait_for_exit(), 1);
     auto directory = std::make_shared<StorageDirectory>(data_dir);
-    StateStorage state{directory};
+    RaftStateStorage state{directory};
     LogStorage log{directory};
-    EXPECT_EQ(state.load().current_term, 5u);
+    EXPECT_EQ(state.load_term_vote().current_term, 5u);
     EXPECT_EQ(log.load().back().command, "old");
 }
 
@@ -280,18 +278,18 @@ TEST_F(PersistentServer, LeaderRetriesAndCopiesMultipleBatchesToDivergentFollowe
     const auto follower_endpoint = "ipc://" + (root / "follower.sock").string();
     {
         auto directory = std::make_shared<StorageDirectory>(data_dir);
-        StateStorage state{directory};
+        RaftStateStorage state{directory};
         LogStorage log{directory};
-        state.save({3, std::nullopt});
+        state.save_term_vote({3, std::nullopt});
         std::vector<LogEntry> entries{{1, 1, "prefix"}};
         for (std::uint64_t i = 2; i <= 131; ++i) entries.push_back({i, 2, "command-" + std::to_string(i)});
         log.append(entries);
     }
     {
         auto directory = std::make_shared<StorageDirectory>(follower_data);
-        StateStorage state{directory};
+        RaftStateStorage state{directory};
         LogStorage log{directory};
-        state.save({3, std::nullopt});
+        state.save_term_vote({3, std::nullopt});
         log.append({{1, 1, "prefix"}, {2, 1, "conflict"}, {3, 1, "old"}});
     }
     auto follower = std::make_unique<ServerProcess>(std::vector<std::string>{follower_endpoint,
@@ -329,9 +327,9 @@ TEST_F(PersistentServer, LeaderRetriesAndCopiesMultipleBatchesToDivergentFollowe
 TEST_F(PersistentServer, RecoversLogMetadataBeforeVoting) {
     {
         auto directory = std::make_shared<StorageDirectory>(data_dir);
-        StateStorage storage{directory};
+        RaftStateStorage storage{directory};
         LogStorage log{directory};
-        storage.save({5, std::nullopt});
+        storage.save_term_vote({5, std::nullopt});
         log.append({{1, 3, "first"}, {2, 5, "second"}});
     }
     start();
@@ -342,9 +340,9 @@ TEST_F(PersistentServer, RecoversLogMetadataBeforeVoting) {
 TEST_F(PersistentServer, CorruptLogRefusesStartupBeforeListening) {
     {
         auto directory = std::make_shared<StorageDirectory>(data_dir);
-        StateStorage storage{directory};
+        RaftStateStorage storage{directory};
         LogStorage log{directory};
-        storage.save({5, std::nullopt});
+        storage.save_term_vote({5, std::nullopt});
         log.append({{1, 5, "command"}});
     }
     std::ofstream{data_dir / "log.json", std::ios::binary | std::ios::trunc} << "partial";
@@ -355,9 +353,9 @@ TEST_F(PersistentServer, CorruptLogRefusesStartupBeforeListening) {
 TEST_F(PersistentServer, LogTermBeyondPersistentCurrentTermRefusesStartup) {
     {
         auto directory = std::make_shared<StorageDirectory>(data_dir);
-        StateStorage storage{directory};
+        RaftStateStorage storage{directory};
         LogStorage log{directory};
-        storage.save({4, std::nullopt});
+        storage.save_term_vote({4, std::nullopt});
         log.append({{1, 5, "command"}});
     }
     start();
@@ -387,9 +385,9 @@ TEST_F(PersistentServer, SelfVoteIsPersistedBeforeRestart) {
     ASSERT_TRUE(std::filesystem::exists(data_dir / "state.json"));
     process.reset();
     {
-        StateStorage storage{data_dir};
-        EXPECT_EQ(storage.load().current_term, 1u);
-        EXPECT_EQ(storage.load().voted_for, 1u);
+        RaftStateStorage storage{data_dir};
+        EXPECT_EQ(storage.load_term_vote().current_term, 1u);
+        EXPECT_EQ(storage.load_term_vote().voted_for, 1u);
     }
     start();
     const auto response = decode_vote_response(call(make_vote_request(1, {1, 2, 0, 0})));
@@ -410,9 +408,9 @@ TEST_F(PersistentServer, FailedVotePersistenceExitsWithoutSuccessfulReply) {
     zmq::pollitem_t item{socket.handle(), 0, ZMQ_POLLIN, 0};
     EXPECT_EQ(zmq::poll(&item, 1, 500ms), 0);
     EXPECT_EQ(process->wait_for_exit(), 1);
-    StateStorage storage{data_dir};
-    EXPECT_EQ(storage.load().current_term, 5u);
-    EXPECT_EQ(storage.load().voted_for, 2u);
+    RaftStateStorage storage{data_dir};
+    EXPECT_EQ(storage.load_term_vote().current_term, 5u);
+    EXPECT_EQ(storage.load_term_vote().voted_for, 2u);
 }
 
 TEST_F(PersistentServer, StorageFailureOnHigherTermResponseIsNotSwallowedAsPeerError) {
@@ -428,15 +426,15 @@ TEST_F(PersistentServer, StorageFailureOnHigherTermResponseIsNotSwallowedAsPeerE
     std::filesystem::create_directory(data_dir / "state.tmp");
     send_message(peer, make_vote_response(request.id, {9, false}));
     EXPECT_EQ(process->wait_for_exit(), 1);
-    StateStorage storage{data_dir};
-    EXPECT_EQ(storage.load().current_term, 1u);
-    EXPECT_EQ(storage.load().voted_for, 1u);
+    RaftStateStorage storage{data_dir};
+    EXPECT_EQ(storage.load_term_vote().current_term, 1u);
+    EXPECT_EQ(storage.load_term_vote().voted_for, 1u);
 }
 
 TEST_F(PersistentServer, CorruptStateRefusesStartupBeforeListening) {
     {
-        StateStorage storage{data_dir};
-        storage.save({5, 2});
+        RaftStateStorage storage{data_dir};
+        storage.save_term_vote({5, 2});
     }
     std::ofstream{data_dir / "state.json", std::ios::binary | std::ios::trunc} << "partial";
     start();
@@ -529,10 +527,10 @@ TEST_F(CommittedCluster, CommitsWithOneFollowerDownAndPreservesStateAcrossLeader
     for (auto& node : nodes) node.reset();
     for (int i = 0; i < 3; ++i) {
         auto directory = std::make_shared<StorageDirectory>(directories[i]);
-        CommitStorage commit{directory};
+        RaftStateStorage commit{directory};
         LogStorage log{directory};
         KeyValueStateMachine machine;
-        machine.apply_committed(log.load(), commit.load().index);
+        machine.apply_committed(log.load(), commit.load_commit().index);
         EXPECT_EQ(machine.get("key"), "successor");
     }
 }

@@ -1,4 +1,4 @@
-#include "server/storage/state_storage.hpp"
+#include "server/storage/raft_state_storage.hpp"
 #include "server/storage/log_storage.hpp"
 
 #include "storage_test_helpers.hpp"
@@ -34,15 +34,15 @@ TEST_F(LogStorageTest, AppendsAndRecoversBinaryCommandsAndFullWidthTerms) {
     {
         auto shared = std::make_shared<StorageDirectory>(directory);
         LogStorage storage{shared};
-        StateStorage state{shared};
+        RaftStateStorage state{shared};
         EXPECT_TRUE(storage.load().empty());
         storage.append({{1, 2, binary}, {2, 2, ""}});
         storage.append({{3, maximum, "last"}});
-        state.save({maximum, 7});
+        state.save_term_vote({maximum, 7});
     }
     auto shared = std::make_shared<StorageDirectory>(directory);
     LogStorage reopened{shared};
-    StateStorage state{shared};
+    RaftStateStorage state{shared};
     const auto log = reopened.load();
     ASSERT_EQ(log.size(), 3u);
     EXPECT_EQ(log[0].index, 1u);
@@ -53,23 +53,23 @@ TEST_F(LogStorageTest, AppendsAndRecoversBinaryCommandsAndFullWidthTerms) {
     EXPECT_EQ(log[2].index, 3u);
     EXPECT_EQ(log[2].term, maximum);
     EXPECT_EQ(log[2].command, "last");
-    EXPECT_EQ(state.load().voted_for, 7u);
+    EXPECT_EQ(state.load_term_vote().voted_for, 7u);
 }
 
 TEST_F(LogStorageTest, SharedDirectoryStaysLockedUntilBothStoresAreDestroyed) {
     auto shared = std::make_shared<StorageDirectory>(directory);
-    auto state = std::make_unique<StateStorage>(shared);
+    auto state = std::make_unique<RaftStateStorage>(shared);
     auto log = std::make_unique<LogStorage>(shared);
     shared.reset();
-    state->save({2, 7});
+    state->save_term_vote({2, 7});
     log->append({{1, 2, "command"}});
     EXPECT_THROW((LogStorage{directory}), StorageError);
     state.reset();
-    EXPECT_THROW((StateStorage{directory}), StorageError);
+    EXPECT_THROW((RaftStateStorage{directory}), StorageError);
     EXPECT_EQ(log->load().back().command, "command");
     log.reset();
-    StateStorage reopened{directory};
-    EXPECT_EQ(reopened.load().current_term, 2u);
+    RaftStateStorage reopened{directory};
+    EXPECT_EQ(reopened.load_term_vote().current_term, 2u);
 }
 
 TEST_F(LogStorageTest, TruncatesSuffixAndAllowsReplacementAfterRestart) {

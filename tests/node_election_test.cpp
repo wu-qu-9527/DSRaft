@@ -10,16 +10,17 @@ namespace {
 class NodeElection : public ::testing::Test {
 protected:
     NodeConfig config{1, "inproc://node-1", {{2, "inproc://node-2"}, {3, "inproc://node-3"}}};
-    VoteState state;
-    Role role{Role::Follower};
-    Election election{config, state, role};
+    TermVoteState state;
+    LogState log_state;
+    LeadershipState leadership;
+    Election election{config, state, log_state, leadership};
 };
 
 TEST_F(NodeElection, StartsNewTermAndVotesForSelfOnEveryRound) {
     const auto request = election.start();
     EXPECT_EQ(request.term, 1u);
     EXPECT_EQ(request.candidate_id, 1u);
-    EXPECT_EQ(role, Role::Candidate);
+    EXPECT_EQ(leadership.role, Role::Candidate);
     EXPECT_EQ(state.voted_for, 1u);
     EXPECT_EQ(election.votes(), 1u);
     EXPECT_EQ(election.start().term, 2u);
@@ -32,19 +33,19 @@ TEST_F(NodeElection, WinsWithMajorityAndIgnoresStaleOrUnknownReplies) {
     election.handle_vote_response(99, 1, {1, true});
     election.handle_vote_response(1, 1, {1, true});
     election.handle_vote_response(3, 1, {1, false});
-    EXPECT_EQ(role, Role::Candidate);
+    EXPECT_EQ(leadership.role, Role::Candidate);
     EXPECT_EQ(election.votes(), 1u);
     election.handle_vote_response(2, 1, {1, true});
-    EXPECT_EQ(role, Role::Leader);
+    EXPECT_EQ(leadership.role, Role::Leader);
     EXPECT_EQ(election.votes(), 2u);
 }
 
 TEST_F(NodeElection, HigherTermResponseStepsLeaderDown) {
     election.start();
     election.handle_vote_response(2, 1, {1, true});
-    ASSERT_EQ(role, Role::Leader);
+    ASSERT_EQ(leadership.role, Role::Leader);
     election.handle_vote_response(3, 1, {5, false});
-    EXPECT_EQ(role, Role::Follower);
+    EXPECT_EQ(leadership.role, Role::Follower);
     EXPECT_EQ(state.current_term, 5u);
     EXPECT_FALSE(state.voted_for.has_value());
 }
@@ -52,25 +53,27 @@ TEST_F(NodeElection, HigherTermResponseStepsLeaderDown) {
 TEST(NodeElectionCounting, DuplicateVotesDoNotFormMajority) {
     NodeConfig config{1, "inproc://one", {{2, "inproc://two"}, {3, "inproc://three"},
                                            {4, "inproc://four"}, {5, "inproc://five"}}};
-    VoteState state;
-    Role role{Role::Follower};
-    Election election{config, state, role};
+    TermVoteState state;
+    LogState log_state;
+    LeadershipState leadership;
+    Election election{config, state, log_state, leadership};
     election.start();
     election.handle_vote_response(2, 1, {1, true});
     election.handle_vote_response(2, 1, {1, true});
     EXPECT_EQ(election.votes(), 2u);
-    EXPECT_EQ(role, Role::Candidate);
+    EXPECT_EQ(leadership.role, Role::Candidate);
     election.handle_vote_response(3, 1, {1, true});
-    EXPECT_EQ(role, Role::Leader);
+    EXPECT_EQ(leadership.role, Role::Leader);
 }
 
 TEST(NodeElectionCounting, SingleNodeElectsItself) {
     NodeConfig config;
-    VoteState state;
-    Role role{Role::Follower};
-    Election election{config, state, role};
+    TermVoteState state;
+    LogState log_state;
+    LeadershipState leadership;
+    Election election{config, state, log_state, leadership};
     election.start();
-    EXPECT_EQ(role, Role::Leader);
+    EXPECT_EQ(leadership.role, Role::Leader);
 }
 
 TEST(PeerVotingRpc, ServerNodesRequestAndRespondWithoutBusinessClient) {
@@ -81,10 +84,11 @@ TEST(PeerVotingRpc, ServerNodesRequestAndRespondWithoutBusinessClient) {
     PeerRpc sender{context, {2, "inproc://peer-vote"}};
     sender.requestVoteFor({1, 1, 0, 0}, 42);
     const auto incoming = receive_message(receiver);
-    VoteState voter;
-    Role role = Role::Follower;
+    TermVoteState voter;
+    LogState log_state;
+    LeadershipState leadership;
     ElectionTimer timer;
-    const auto result = voteFor(decode_vote_request(incoming), voter, role, timer);
+    const auto result = voteFor(decode_vote_request(incoming), voter, log_state, leadership, timer);
     send_message(receiver, make_vote_response(incoming.id, result));
     zmq::pollitem_t item{sender.handle(), 0, ZMQ_POLLIN, 0};
     ASSERT_GT(zmq::poll(&item, 1, std::chrono::milliseconds{1000}), 0);

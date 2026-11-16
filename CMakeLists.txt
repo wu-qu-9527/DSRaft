@@ -8,6 +8,7 @@ include(CTest)
 add_library(zmq_transport
     src/common/zmq_transport.cpp
     src/common/message.cpp
+    src/common/client_request.cpp
     src/common/binary_codec.cpp)
 add_library(zmq_template::transport ALIAS zmq_transport)
 target_compile_features(zmq_transport PUBLIC cxx_std_17)

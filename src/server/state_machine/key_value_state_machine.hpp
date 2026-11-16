@@ -24,8 +24,15 @@ public:
     std::optional<std::string> get(const std::string& key) const;
 
 private:
+    struct Session {
+        std::uint64_t sequence;
+        std::string command;
+        std::string result;
+    };
     std::string execute(const std::string& command);
+    std::string execute_business(const std::string& command);
     std::map<std::string, std::string> values_;
+    std::map<std::string, Session> sessions_;
     std::uint64_t last_applied_{0};
 };
 

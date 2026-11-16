@@ -1,4 +1,5 @@
 #include "common/zmq_transport.hpp"
+#include "common/client_request.hpp"
 #include "server/rpc/heartbeat_rpc.hpp"
 #include "server/rpc/vote_rpc.hpp"
 #include "server/storage/raft_state_storage.hpp"
@@ -133,6 +134,21 @@ TEST_F(PersistentServer, InvalidCandidateDoesNotTerminateServerOrAdvanceTerm) {
     const auto valid = decode_vote_response(call(make_vote_request(2, {1, 2, 0, 0})));
     EXPECT_TRUE(valid.vote_granted);
     EXPECT_EQ(valid.term, 1u);
+}
+
+TEST_F(PersistentServer, DuplicateRequestRetainsResultAndSideEffectsAcrossRestart) {
+    start(true);
+    std::this_thread::sleep_for(200ms);
+    auto request = [&](const char* client, std::uint64_t seq, const char* command) {
+        return call({MessageType::client_request, 42, encode_client_request({client, seq, command})});
+    };
+    ASSERT_EQ(request("alice", 1, "SET key original").payload, "OK");
+    ASSERT_EQ(request("alice", 2, "DEL key").payload, "OK");
+    ASSERT_EQ(request("bob", 1, "SET key replacement").payload, "OK");
+    start(true);
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(request("alice", 2, "DEL key").payload, "OK");
+    EXPECT_EQ(call({MessageType::text, 43, "GET key"}).payload, "VALUE replacement");
 }
 
 TEST_F(PersistentServer, RecoveryReplaysOnlyCommittedPrefix) {

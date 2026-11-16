@@ -1,4 +1,5 @@
 #include "server/state_machine/key_value_state_machine.hpp"
+#include "common/client_request.hpp"
 
 #include <stdexcept>
 #include <string_view>
@@ -31,7 +32,9 @@ Command parse(const std::string& command) {
 }
 } // namespace
 
-void KeyValueStateMachine::validate_command(const std::string& command) { (void)parse(command); }
+void KeyValueStateMachine::validate_command(const std::string& command) {
+    (void)parse(is_client_request(command) ? decode_client_request(command).command : command);
+}
 
 std::optional<std::string> KeyValueStateMachine::get(const std::string& key) const {
     const auto found = values_.find(key);
@@ -42,18 +45,34 @@ std::optional<std::string> KeyValueStateMachine::get(const std::string& key) con
 std::string KeyValueStateMachine::execute(const std::string& command) {
     if (command.empty()) return {}; // Internal no-op.
     try {
-        const auto parsed = parse(command);
-        if (parsed.operation == "SET") {
-            values_[parsed.key] = parsed.value;
-            return "OK";
+        if (!is_client_request(command)) return execute_business(command);
+        const auto request = decode_client_request(command);
+        (void)parse(request.command);
+        const auto found = sessions_.find(request.client_id);
+        if (found != sessions_.end()) {
+            if (request.sequence < found->second.sequence) return "ERROR stale request sequence";
+            if (request.sequence == found->second.sequence) {
+                return request.command == found->second.command ? found->second.result
+                    : "ERROR request sequence reused with different command";
+            }
         }
-        if (parsed.operation == "DEL") return values_.erase(parsed.key) ? "OK" : "NOT_FOUND";
-        const auto value = get(parsed.key);
-        return value ? "VALUE " + *value : "NOT_FOUND";
+        auto result = execute_business(request.command);
+        sessions_[request.client_id] = {request.sequence, request.command, result};
+        return result;
     } catch (const std::invalid_argument&) {
-        // Legacy opaque commands produce a deterministic error without changing the map.
         return "ERROR invalid command";
     }
+}
+
+std::string KeyValueStateMachine::execute_business(const std::string& command) {
+    const auto parsed = parse(command);
+    if (parsed.operation == "SET") {
+        values_[parsed.key] = parsed.value;
+        return "OK";
+    }
+    if (parsed.operation == "DEL") return values_.erase(parsed.key) ? "OK" : "NOT_FOUND";
+    const auto value = get(parsed.key);
+    return value ? "VALUE " + *value : "NOT_FOUND";
 }
 
 std::vector<AppliedResult> KeyValueStateMachine::apply_committed(

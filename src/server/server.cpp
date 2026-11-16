@@ -1,6 +1,7 @@
 #include "server/server.hpp"
 #include "common/zmq_transport.hpp"
 #include "common/logging.hpp"
+#include "common/client_request.hpp"
 #include "server/state.hpp"
 #include "server/election_timer.hpp"
 #include "server/vote_handler.hpp"
@@ -206,13 +207,16 @@ void server::handle_request(Runtime& runtime) {
             response = zmq_template::make_heartbeat_response(message.id, result.response);
             spdlog::debug("Heartbeat received leader={} term={} success={}",
                           request.leader_id, request.term, result.response.success);
-        } else if (message.type == zmq_template::MessageType::text) {
+        } else if (message.type == zmq_template::MessageType::text
+                   || message.type == zmq_template::MessageType::client_request) {
             if (leadership_.role != Role::Leader || !runtime.leader_active
                 || runtime.heartbeat_term != term_vote_state_.current_term) {
                 throw std::invalid_argument(leadership_.leader_id
                     ? "Not leader; known leader ID=" + std::to_string(*leadership_.leader_id)
                     : "Not leader; leader unknown");
             }
+            if (message.type == MessageType::client_request) (void)decode_client_request(message.payload);
+            else if (is_client_request(message.payload)) throw std::invalid_argument("Use client_request for identified commands");
             KeyValueStateMachine::validate_command(message.payload);
             if (message.payload.size() > max_payload_size - 72) {
                 throw std::invalid_argument("Command is too large for AppendEntries");

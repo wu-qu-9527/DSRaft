@@ -27,6 +27,14 @@ TEST(ConfigParser, ParsesDataDirectoryAndRejectsEmptyOrRepeatedPaths) {
     EXPECT_THROW(parse({"--data-dir", "first", "--data-dir", "second"}), std::invalid_argument);
 }
 
+TEST(ConfigParser, AcceptsIndependentVoteTimeoutAndRejectsInvalidValues) {
+    EXPECT_EQ(parse({"--vote-timeout-ms", "500"}).vote_timeout, 500ms);
+    for (const auto* value : {"0", "-1", "abc", "2147483648"}) {
+        EXPECT_THROW(parse({"--vote-timeout-ms", value}), std::invalid_argument);
+    }
+    EXPECT_THROW(parse({"--vote-timeout-ms", "100", "--vote-timeout-ms", "200"}), std::invalid_argument);
+}
+
 TEST(ConfigParser, KeepsExistingTimingDefaults) {
     const auto config = parse({});
     EXPECT_EQ(config.heartbeat_interval, 50ms);

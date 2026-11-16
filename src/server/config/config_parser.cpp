@@ -46,6 +46,8 @@ NodeConfig parse_node_config(int argc, char* argv[]) {
             config.heartbeat_interval = parse_milliseconds(value);
         } else if (option == "--heartbeat-timeout-ms") {
             config.heartbeat_timeout = parse_milliseconds(value);
+        } else if (option == "--vote-timeout-ms") {
+            config.vote_timeout = parse_milliseconds(value);
         } else if (option == "--election-timeout-min-ms") {
             config.election_timeout_min = parse_milliseconds(value);
         } else if (option == "--election-timeout-max-ms") {

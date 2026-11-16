@@ -19,6 +19,7 @@ struct NodeConfig {
     std::vector<PeerConfig> peers;
     std::chrono::milliseconds heartbeat_interval{50};
     std::chrono::milliseconds heartbeat_timeout{100};
+    std::chrono::milliseconds vote_timeout{100};
     std::chrono::milliseconds election_timeout_min{150};
     std::chrono::milliseconds election_timeout_max{300};
     std::filesystem::path data_dir; // Empty uses data/node-<id> beside the executable.

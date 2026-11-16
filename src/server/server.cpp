@@ -161,7 +161,7 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     runtime->socket.bind(config.endpoint);
     std::signal(SIGINT, request_stop);
     std::signal(SIGTERM, request_stop);
-    for (const auto& peer : config.peers) runtime->peers.emplace_back(runtime->context, peer, config.heartbeat_timeout);
+    for (const auto& peer : config.peers) runtime->peers.emplace_back(runtime->context, peer, config.heartbeat_timeout, config.vote_timeout);
     spdlog::info("Listening on {} node={} role={} election_timeout={}ms election_range=[{},{}]ms "
                  "heartbeat_interval={}ms heartbeat_timeout={}ms",
                  runtime->socket.get(zmq::sockopt::last_endpoint), config.id,

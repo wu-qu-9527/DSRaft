@@ -18,14 +18,16 @@ class PeerRpc {
 public:
     using Clock = std::chrono::steady_clock;
     PeerRpc(zmq::context_t& context, PeerConfig peer,
-            std::chrono::milliseconds heartbeat_timeout = std::chrono::milliseconds{100})
-        : context_(context), peer_(std::move(peer)), heartbeat_timeout_(heartbeat_timeout) {
+            std::chrono::milliseconds heartbeat_timeout = std::chrono::milliseconds{100},
+            std::chrono::milliseconds vote_timeout = std::chrono::milliseconds{100})
+        : context_(context), peer_(std::move(peer)), heartbeat_timeout_(heartbeat_timeout), vote_timeout_(vote_timeout) {
         if (heartbeat_timeout.count() <= 0) throw std::invalid_argument("Heartbeat timeout must be positive");
+        if (vote_timeout.count() <= 0) throw std::invalid_argument("Vote timeout must be positive");
     }
 
     void requestVoteFor(const RequestVoteRequest& request, std::uint32_t rpc_id,
                         Clock::time_point now = Clock::now()) {
-        start_call(make_vote_request(rpc_id, request), request.term, now, std::chrono::milliseconds{100});
+        start_call(make_vote_request(rpc_id, request), request.term, now, vote_timeout_);
     }
 
     void requestHeartbeat(const HeartbeatRequest& request, std::uint32_t rpc_id,
@@ -86,6 +88,7 @@ private:
     zmq::context_t& context_;
     PeerConfig peer_;
     std::chrono::milliseconds heartbeat_timeout_;
+    std::chrono::milliseconds vote_timeout_;
     std::unique_ptr<zmq::socket_t> socket_;
     MessageType request_type_{MessageType::request_vote};
     std::uint32_t rpc_id_{};

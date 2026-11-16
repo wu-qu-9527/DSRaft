@@ -1,5 +1,6 @@
 #include "common/zmq_transport.hpp"
 #include "common/client_request.hpp"
+#include "client/request_client.hpp"
 #include "server/rpc/heartbeat_rpc.hpp"
 #include "server/rpc/vote_rpc.hpp"
 #include "server/storage/raft_state_storage.hpp"
@@ -570,6 +571,17 @@ TEST_F(CommittedCluster, IsolatedLeaderCannotReturnSuccessfulWrite) {
     EXPECT_EQ(response.type, MessageType::error);
     EXPECT_NE(response.payload.find("outcome unknown"), std::string::npos);
     EXPECT_EQ(read_index(directories[leader] / "commit.json"), committed);
+}
+
+TEST_F(CommittedCluster, ClientDiscoversNewLeaderAndRetryDoesNotOverwriteLaterWrite) {
+    zmq::context_t context{1};
+    const int original = find_leader();
+    const ClientRequest first{"alice", 1, "SET key original"};
+    ASSERT_EQ(submit_request(context, endpoints, first, 5s, 300ms).payload, "OK");
+    ASSERT_EQ(submit_request(context, endpoints, {"bob", 1, "SET key newer"}, 5s, 300ms).payload, "OK");
+    nodes[original].reset();
+    EXPECT_EQ(submit_request(context, endpoints, first, 5s, 300ms).payload, "OK");
+    EXPECT_EQ(submit_request(context, endpoints, {"reader", 1, "GET key"}, 5s, 300ms).payload, "VALUE newer");
 }
 
 TEST_F(CommittedCluster, PendingClientDoesNotBlockHeartbeatAndCannotReceiveOverwrittenCommandsResult) {

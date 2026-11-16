@@ -6,6 +6,7 @@ include(cmake/Dependencies.cmake)
 include(CTest)
 
 add_library(zmq_transport
+    src/client/request_client.cpp
     src/common/zmq_transport.cpp
     src/common/message.cpp
     src/common/client_request.cpp
@@ -59,6 +60,7 @@ if(BUILD_TESTING)
     include(cmake/Testing.cmake)
     find_package(Threads REQUIRED)
     add_executable(zmq_tests
+        tests/client_retry_test.cpp
         tests/persistence_integration_test.cpp
         tests/state_storage_test.cpp
         tests/log_storage_test.cpp

@@ -125,6 +125,16 @@ TEST_F(PersistentServer, SingleNodeBusinessCommandsCommitAndRecoverState) {
     FAIL() << "Server did not recover leadership";
 }
 
+TEST_F(PersistentServer, InvalidCandidateDoesNotTerminateServerOrAdvanceTerm) {
+    start();
+    auto invalid = make_vote_request(1, {100, 2, 1, 99});
+    invalid.payload.replace(8, 8, 8, '\0');
+    EXPECT_EQ(call(invalid).type, MessageType::error);
+    const auto valid = decode_vote_response(call(make_vote_request(2, {1, 2, 0, 0})));
+    EXPECT_TRUE(valid.vote_granted);
+    EXPECT_EQ(valid.term, 1u);
+}
+
 TEST_F(PersistentServer, RecoveryReplaysOnlyCommittedPrefix) {
     start();
     ASSERT_TRUE(decode_heartbeat_response(call(make_heartbeat_request(1,

@@ -1,5 +1,6 @@
 #include "server/rpc/vote_rpc.hpp"
 #include "server/vote_handler.hpp"
+#include "common/binary_codec.hpp"
 
 #include <gtest/gtest.h>
 #include <limits>
@@ -43,6 +44,18 @@ TEST(VoteRpc, RejectsMalformedPayloadAndWrongTypes) {
     EXPECT_THROW(decode_vote_response(reply), std::invalid_argument);
     reply.payload.pop_back();
     EXPECT_THROW(decode_vote_response(reply), std::invalid_argument);
+}
+
+TEST(VoteRpc, RejectsInvalidFieldsBeforeTheyCanChangeState) {
+    for (const auto request : {RequestVoteRequest{1, 0, 0, 0}, {0, 2, 0, 0},
+                              {2, 2, 0, 1}, {2, 2, 1, 0}, {2, 2, 1, 3}}) {
+        Message raw{MessageType::request_vote, 1, {}};
+        for (auto value : {request.term, request.candidate_id, request.last_log_index, request.last_log_term}) {
+            binary::append_u64(raw.payload, value);
+        }
+        EXPECT_THROW(decode_vote_request(raw), std::invalid_argument);
+        EXPECT_THROW(make_vote_request(1, request), std::invalid_argument);
+    }
 }
 
 class VoteHandler : public ::testing::Test {

@@ -5,8 +5,18 @@
 #include <stdexcept>
 
 namespace zmq_template {
+namespace {
+void validate_request(const RequestVoteRequest& request) {
+    if (request.term == 0 || request.candidate_id == 0
+        || (request.last_log_index == 0) != (request.last_log_term == 0)
+        || request.last_log_term > request.term) {
+        throw std::invalid_argument("Invalid RequestVote fields");
+    }
+}
+} // namespace
 
 Message make_vote_request(std::uint32_t rpc_id, const RequestVoteRequest& request) {
+    validate_request(request);
     Message message{MessageType::request_vote, rpc_id, {}};
     binary::append_u64(message.payload, request.term);
     binary::append_u64(message.payload, request.candidate_id);
@@ -26,8 +36,10 @@ RequestVoteRequest decode_vote_request(const Message& message) {
     if (message.type != MessageType::request_vote || message.payload.size() != 32) {
         throw std::invalid_argument("Invalid RequestVote request");
     }
-    return {binary::read_u64(message.payload, 0), binary::read_u64(message.payload, 8),
+    const RequestVoteRequest request{binary::read_u64(message.payload, 0), binary::read_u64(message.payload, 8),
             binary::read_u64(message.payload, 16), binary::read_u64(message.payload, 24)};
+    validate_request(request);
+    return request;
 }
 
 RequestVoteResponse decode_vote_response(const Message& message) {

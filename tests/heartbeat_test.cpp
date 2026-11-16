@@ -44,6 +44,14 @@ TEST(HeartbeatRpc, RejectsInvalidSizeTypeAndBoolean) {
     EXPECT_THROW(decode_heartbeat_response(message), std::invalid_argument);
 }
 
+TEST(HeartbeatRpc, RejectsZeroLeaderOrTermOnTheWire) {
+    for (std::size_t offset : {0u, 8u}) {
+        auto message = make_heartbeat_request(1, {1, 2, 0, 0, 0});
+        message.payload.replace(offset, 8, 8, '\0');
+        EXPECT_THROW(decode_heartbeat_request(message), std::invalid_argument);
+    }
+}
+
 class HeartbeatHandler : public ::testing::Test {
 protected:
     const ElectionTimer::Clock::time_point now{};

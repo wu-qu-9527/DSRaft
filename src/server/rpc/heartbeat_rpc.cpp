@@ -9,7 +9,8 @@
 namespace zmq_template {
 namespace {
 void validate_request(const HeartbeatRequest& request) {
-    if ((request.prev_log_index == 0) != (request.prev_log_term == 0)
+    if (request.term == 0 || request.leader_id == 0
+        || (request.prev_log_index == 0) != (request.prev_log_term == 0)
         || request.prev_log_term > request.term) {
         throw std::invalid_argument("Invalid AppendEntries predecessor");
     }

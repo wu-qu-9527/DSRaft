@@ -1,6 +1,7 @@
 #include "common/zmq_transport.hpp"
 #include "common/client_request.hpp"
 #include "client/request_client.hpp"
+#include "network_test_helpers.hpp"
 #include "server/rpc/heartbeat_rpc.hpp"
 #include "server/rpc/vote_rpc.hpp"
 #include "server/storage/raft_state_storage.hpp"
@@ -470,6 +471,7 @@ TEST_F(PersistentServer, CorruptStateRefusesStartupBeforeListening) {
 }
 class CommittedCluster : public PersistentServer {
 protected:
+    virtual bool use_fault_proxies() const { return false; }
     void SetUp() override {
         PersistentServer::SetUp();
         nodes.resize(3);
@@ -477,10 +479,18 @@ protected:
             directories.push_back(root / ("node-" + std::to_string(i + 1)));
             endpoints.push_back("ipc://" + (root / ("node-" + std::to_string(i + 1) + ".sock")).string());
         }
+        if (use_fault_proxies()) {
+            for (int i = 0; i < 3; ++i) for (int j = 0; j < 3; ++j) {
+                if (i == j) continue;
+                proxy_endpoints[i][j] = "ipc://" + (root / ("proxy-" + std::to_string(i) + "-" + std::to_string(j))).string();
+                proxies[i][j] = std::make_unique<test::FaultProxy>(proxy_endpoints[i][j], endpoints[j]);
+            }
+        }
         for (int i = 0; i < 3; ++i) start_node(i);
     }
     void TearDown() override {
         nodes.clear();
+        for (auto& row : proxies) for (auto& proxy : row) proxy.reset();
         PersistentServer::TearDown();
     }
     void start_node(int i) {
@@ -488,7 +498,8 @@ protected:
             "--data-dir", directories[i].string(), "--heartbeat-interval-ms", "10",
             "--election-timeout-min-ms", "200", "--election-timeout-max-ms", "400"};
         for (int j = 0; j < 3; ++j) {
-            if (i != j) args.insert(args.end(), {"--peer", std::to_string(j + 1) + "=" + endpoints[j]});
+            if (i != j) args.insert(args.end(), {"--peer", std::to_string(j + 1) + "="
+                + (use_fault_proxies() ? proxy_endpoints[i][j] : endpoints[j])});
         }
         nodes[i] = std::make_unique<ServerProcess>(std::move(args), root / ("cluster-" + std::to_string(i) + ".log"));
     }
@@ -532,7 +543,53 @@ protected:
     std::vector<std::unique_ptr<ServerProcess>> nodes;
     std::vector<std::filesystem::path> directories;
     std::vector<std::string> endpoints;
+    std::string proxy_endpoints[3][3];
+    std::unique_ptr<test::FaultProxy> proxies[3][3];
 };
+
+class PartitionedCluster : public CommittedCluster {
+protected:
+    bool use_fault_proxies() const override { return true; }
+    void partition(int isolated, bool active) {
+        for (int i = 0; i < 3; ++i) if (i != isolated) {
+            proxies[isolated][i]->drop_requests = active;
+            proxies[i][isolated]->drop_requests = active;
+        }
+    }
+};
+
+TEST_F(PartitionedCluster, LiveOldLeaderCannotCommitAndRepairsItsSuffixAfterHealing) {
+    const int old = find_leader();
+    ASSERT_EQ(command(old, "SET key before").payload, "OK");
+    partition(old, true);
+    EXPECT_EQ(command(old, "SET key uncommitted").type, MessageType::error);
+    zmq::context_t context{1};
+    std::vector<std::string> majority;
+    for (int i = 0; i < 3; ++i) if (i != old) majority.push_back(endpoints[i]);
+    ASSERT_EQ(submit_request(context, majority, {"majority", 1, "SET key after"}, 5s).payload, "OK");
+    partition(old, false);
+    const int leader = find_leader();
+    const auto committed = read_index(directories[leader] / "commit.json");
+    ASSERT_TRUE(wait_for_commit(old, committed));
+    EXPECT_EQ(submit_request(context, endpoints, {"reader", 1, "GET key"}, 5s).payload, "VALUE after");
+    nodes[old].reset();
+    auto directory = std::make_shared<StorageDirectory>(directories[old]);
+    RaftStateStorage state{directory};
+    LogStorage log{directory};
+    KeyValueStateMachine machine;
+    machine.apply_committed(log.load(), state.load_commit().index);
+    EXPECT_EQ(machine.get("key"), "after");
+}
+
+TEST_F(PartitionedCluster, AsymmetricResponseLossAndDelayStillAllowMajorityProgress) {
+    const int leader = find_leader();
+    const int slow = (leader + 1) % 3;
+    proxies[leader][slow]->drop_responses = true;
+    proxies[leader][(leader + 2) % 3]->delay_ms = 25;
+    ASSERT_EQ(command(leader, "SET key majority").payload, "OK");
+    proxies[leader][slow]->drop_responses = false;
+    ASSERT_TRUE(wait_for_commit(slow, read_index(directories[leader] / "commit.json")));
+}
 
 TEST_F(CommittedCluster, CommitsWithOneFollowerDownAndPreservesStateAcrossLeaderChange) {
     const int original = find_leader();

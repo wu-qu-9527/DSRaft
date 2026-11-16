@@ -92,6 +92,20 @@ TEST_F(HeartbeatHandler, StaleHeartbeatDoesNotChangeRoleOrResetTimer) {
     EXPECT_EQ(timer.remaining(now + 100ms), 100ms);
 }
 
+TEST_F(HeartbeatHandler, DelayedOlderTermCannotOverwriteNewlyCommittedHistory) {
+    std::vector<LogEntry> entries;
+    CommitState committed;
+    const HeartbeatRequest newer{6, 2, 0, 0, 1, {{1, 6, "SET key new"}}};
+    EXPECT_TRUE(handle_heartbeat(newer, state, log_state, committed, leadership, timer, entries).response.success);
+    EXPECT_TRUE(handle_heartbeat(newer, state, log_state, committed, leadership, timer, entries).response.success);
+    const HeartbeatRequest delayed{5, 3, 0, 0, 1, {{1, 5, "SET key old"}}};
+    EXPECT_FALSE(handle_heartbeat(delayed, state, log_state, committed, leadership, timer, entries).response.success);
+    ASSERT_EQ(entries.size(), 1u);
+    EXPECT_EQ(entries[0].command, "SET key new");
+    EXPECT_EQ(committed.commit_index, 1u);
+    EXPECT_EQ(state.current_term, 6u);
+}
+
 TEST_F(HeartbeatHandler, LogMismatchStillResetsElectionTimerButDoesNotCommit) {
     log_state.last_log_index = 10;
     log_state.last_log_term = 3;

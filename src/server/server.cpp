@@ -434,7 +434,7 @@ void server::tick_leader(Runtime& runtime) {
             if (peer.pending()) continue;
             if (runtime.replication.at(peer.id()).next_index() <= runtime.snapshot.index) {
                 auto& transfer = runtime.outgoing_snapshots[peer.id()];
-                if (transfer.index != runtime.snapshot.index) {
+                if (transfer.bytes.empty() || transfer.offset == transfer.bytes.size()) {
                     transfer = {runtime.snapshot.index, runtime.snapshot.term, config_.id, 0, 0, snapshot_payload(runtime.snapshot)};
                 }
                 try {

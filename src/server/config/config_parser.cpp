@@ -1,4 +1,5 @@
 #include "server/config/config_parser.hpp"
+#include "server/membership.hpp"
 
 #include <charconv>
 #include <set>
@@ -54,6 +55,8 @@ NodeConfig parse_node_config(int argc, char* argv[]) {
             config.election_timeout_min = parse_milliseconds(value);
         } else if (option == "--election-timeout-max-ms") {
             config.election_timeout_max = parse_milliseconds(value);
+        } else if (option == "--voters") {
+            config.voters = parse_voters(value);
         } else if (option == "--peer") {
             const auto separator = value.find('=');
             if (separator == std::string::npos || separator + 1 == value.size()) {
@@ -77,6 +80,9 @@ NodeConfig parse_node_config(int argc, char* argv[]) {
         if (!ids.insert(peer.id).second || !endpoints.insert(peer.endpoint).second) {
             throw std::invalid_argument("Duplicate/self peer ID or endpoint");
         }
+    }
+    for (auto id : config.voters) {
+        if (!ids.count(id)) throw std::invalid_argument("Unknown bootstrap voter");
     }
     return config;
 }

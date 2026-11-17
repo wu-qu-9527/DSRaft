@@ -22,6 +22,7 @@ void validate_type(MessageType type) {
     case MessageType::client_request:
     case MessageType::install_snapshot:
     case MessageType::install_snapshot_response:
+    case MessageType::configure_membership:
         return;
     }
     throw std::invalid_argument("Unknown message type");

@@ -18,6 +18,7 @@ enum class MessageType : std::uint32_t {
     client_request = 8,
     install_snapshot = 9,
     install_snapshot_response = 10,
+    configure_membership = 11,
 };
 
 // Shared application message. Never transmit the raw struct (it contains a string).

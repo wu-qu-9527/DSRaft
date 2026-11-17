@@ -3,6 +3,7 @@
 #include "server/config/node_config.hpp"
 #include "common/message.hpp"
 #include "server/state.hpp"
+#include "server/membership.hpp"
 #include "server/storage/raft_state_storage.hpp"
 #include "server/storage/log_storage.hpp"
 
@@ -34,6 +35,8 @@ private:
     void advance_commit(Runtime& runtime);
     void complete_pending(Runtime& runtime);
     void compact(Runtime& runtime);
+    void refresh_membership(Runtime& runtime);
+    void append_membership(Runtime& runtime, const Membership& membership);
     Message handle_snapshot(Runtime& runtime, const Message& message);
 
     int run(const NodeConfig& config);

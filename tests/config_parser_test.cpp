@@ -1,4 +1,5 @@
 #include "server/config/config_parser.hpp"
+#include "server/membership.hpp"
 
 #include <gtest/gtest.h>
 
@@ -33,6 +34,23 @@ TEST(ConfigParser, AcceptsIndependentVoteTimeoutAndRejectsInvalidValues) {
         EXPECT_THROW(parse({"--vote-timeout-ms", value}), std::invalid_argument);
     }
     EXPECT_THROW(parse({"--vote-timeout-ms", "100", "--vote-timeout-ms", "200"}), std::invalid_argument);
+}
+
+TEST(ConfigParser, BootstrapVotersCanExcludeLearnersButMustBeKnown) {
+    EXPECT_EQ(parse({"--voters", "2", "--peer", "2=tcp://127.0.0.1:6001"}).voters, Voters{2});
+    EXPECT_THROW(parse({"--voters", "1,1"}), std::invalid_argument);
+    EXPECT_THROW(parse({"--voters", "2"}), std::invalid_argument);
+}
+
+TEST(Membership, JointQuorumRequiresSeparateMajorities) {
+    const auto joint = Membership::decode("1,2,3/3,4,5");
+    const auto confirmed = [&](const Voters& votes) {
+        return joint.quorum([&](auto id) { return votes.count(id); });
+    };
+    EXPECT_FALSE(confirmed({1, 2, 4}));
+    EXPECT_FALSE(confirmed({1, 4, 5}));
+    EXPECT_TRUE(confirmed({1, 3, 4}));
+    EXPECT_EQ(joint.encode(), "1,2,3/3,4,5");
 }
 
 TEST(ConfigParser, KeepsExistingTimingDefaults) {

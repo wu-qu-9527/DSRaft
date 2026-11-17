@@ -30,7 +30,7 @@ void usage() {
     std::cout << "Usage: zmq_client [endpoint] [command] [options]\n"
               << "       zmq_client --cluster endpoint,endpoint,... [command] [options]\n"
               << "       zmq_client --all endpoint [endpoint ...]\n"
-              << "Options: --client-id ID --request-seq N --timeout-ms MS --attempt-timeout-ms MS\n"
+              << "Options: --membership ID,ID,... --client-id ID --request-seq N --timeout-ms MS --attempt-timeout-ms MS\n"
               << "Reuse ID, sequence and command after an unknown outcome; increment sequence only after completion.\n";
 }
 } // namespace
@@ -43,6 +43,7 @@ int main(int argc, char* argv[]) {
         std::vector<std::string> endpoints;
         std::vector<std::string> positional;
         std::string client_id = new_client_id();
+        std::string membership;
         std::uint64_t sequence = 1;
         std::chrono::milliseconds timeout{10000}, attempt_timeout{500};
         for (int i = all ? 2 : 1; i < argc; ++i) {
@@ -59,7 +60,8 @@ int main(int argc, char* argv[]) {
                     endpoints.push_back(endpoint);
                 }
                 if (endpoints.empty()) throw std::invalid_argument("Empty cluster endpoints");
-            } else if (arg == "--client-id") client_id = value;
+            } else if (arg == "--membership") membership = value;
+            else if (arg == "--client-id") client_id = value;
             else if (arg == "--request-seq") sequence = positive(value);
             else if (arg == "--timeout-ms" || arg == "--attempt-timeout-ms") {
                 const auto ms = positive(value);
@@ -79,6 +81,17 @@ int main(int argc, char* argv[]) {
             if (!positional.empty()) command = positional[0];
         }
         zmq::context_t context{1};
+        if (!membership.empty()) {
+            if (all || endpoints.size() != 1) throw std::invalid_argument("Membership change requires a single Leader endpoint");
+            zmq::socket_t socket{context, zmq::socket_type::req};
+            zmq_template::configure_socket(socket);
+            socket.set(zmq::sockopt::linger, 0);
+            socket.connect(endpoints.front());
+            zmq_template::send_message(socket, {zmq_template::MessageType::configure_membership, 1, membership});
+            const auto response = zmq_template::receive_message(socket);
+            std::cout << response.payload << '\n';
+            return response.id == 1 && response.type == zmq_template::MessageType::acknowledgement ? 0 : 1;
+        }
         const zmq_template::ClientRequest request{client_id, sequence, command};
         std::cerr << "client_id=" << client_id << " request_seq=" << sequence << '\n';
         if (!all) {

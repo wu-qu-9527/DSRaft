@@ -14,6 +14,7 @@ void print_help() {
     std::cout << "Usage: zmq_server [bind_endpoint] [options]\n"
               << "  --node-id ID                    Positive node ID (default: 1)\n"
               << "  --data-dir PATH                 State directory (default: <exe-dir>/data/node-<id>)\n"
+              << "  --voters ID,ID,...             Initial voters from the peer catalog\n"
               << "  --peer ID=endpoint              Peer address; may be repeated\n"
               << "  --heartbeat-interval-ms MS      Heartbeat send interval (default: 50)\n"
               << "  --heartbeat-timeout-ms MS       Heartbeat RPC timeout (default: 100)\n"

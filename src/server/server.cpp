@@ -10,7 +10,6 @@
 #include "server/heartbeat.hpp"
 #include "server/log_replication.hpp"
 #include "server/state_machine/key_value_state_machine.hpp"
-#include "server/commit_index.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -56,6 +55,9 @@ struct server::Runtime {
     std::unordered_map<std::uint64_t, LogReplication> replication;
     std::uint32_t next_rpc_id{0};
     Snapshot snapshot;
+    Membership initial_membership;
+    Membership committed_membership;
+    std::uint64_t membership_index{0};
     struct SnapshotTransfer {
         std::uint64_t index{0}, term{0}, leader{0}, total{0}, offset{0};
         std::string bytes;
@@ -86,6 +88,7 @@ void server::persist_commit_and_apply(Runtime& runtime) {
         state_storage_.save_commit(next);
         persisted_commit_ = next;
     }
+    refresh_membership(runtime);
     const auto applied = runtime.machine.apply_committed(runtime.log, commit_state_.commit_index, runtime.snapshot.index);
     for (const auto& result : applied) {
         for (auto& pending : runtime.pending) {
@@ -97,11 +100,44 @@ void server::persist_commit_and_apply(Runtime& runtime) {
     compact(runtime);
 }
 
+void server::refresh_membership(Runtime& runtime) {
+    auto committed = runtime.snapshot.configuration.empty()
+        ? runtime.initial_membership : Membership::decode(runtime.snapshot.configuration);
+    auto latest = committed;
+    runtime.membership_index = runtime.snapshot.configuration.empty() ? 0 : runtime.snapshot.index;
+    for (const auto& entry : runtime.log) {
+        if (!is_membership(entry.command)) continue;
+        latest = Membership::decode(std::string_view{entry.command}.substr(membership_prefix.size()));
+        runtime.membership_index = entry.index;
+        if (entry.index <= commit_state_.commit_index) committed = latest;
+    }
+    runtime.committed_membership = std::move(committed);
+    runtime.election.configure(latest);
+    // A new voter may win under an uncommitted joint configuration. A removed
+    // leader, in turn, remains active until the final configuration commits.
+    if (leadership_.role == Role::Leader && !latest.contains(config_.id)
+        && !runtime.committed_membership.contains(config_.id)) {
+        leadership_ = {};
+        runtime.election_timer.reset();
+    }
+}
+
+void server::append_membership(Runtime& runtime, const Membership& membership) {
+    const LogEntry entry{log_state_.last_log_index + 1, term_vote_state_.current_term,
+        std::string{membership_prefix} + membership.encode()};
+    log_storage_.append({entry});
+    runtime.log.push_back(entry);
+    log_state_.last_log_index = entry.index;
+    log_state_.last_log_term = entry.term;
+    refresh_membership(runtime);
+    runtime.heartbeat_timer.restart();
+}
+
 void server::compact(Runtime& runtime) {
     const auto applied = runtime.machine.last_applied();
     if (config_.snapshot_threshold == 0 || applied - runtime.snapshot.index < config_.snapshot_threshold) return;
     const auto term = runtime.log.at(applied - runtime.snapshot.index - 1).term;
-    Snapshot snapshot{applied, term, runtime.machine.snapshot(), runtime.snapshot.configuration};
+    Snapshot snapshot{applied, term, runtime.machine.snapshot(), runtime.committed_membership.encode()};
     log_storage_.install_snapshot(snapshot);
     runtime.log.erase(runtime.log.begin(), runtime.log.begin() + static_cast<std::size_t>(applied - runtime.snapshot.index));
     runtime.snapshot = std::move(snapshot);
@@ -134,6 +170,7 @@ Message server::handle_snapshot(Runtime& runtime, const Message& message) {
     const auto next = incoming.bytes.size();
     if (next == request.total) {
         auto snapshot = snapshot_from_payload(request.index, request.snapshot_term, incoming.bytes);
+        if (!snapshot.configuration.empty()) (void)Membership::decode(snapshot.configuration);
         KeyValueStateMachine restored;
         restored.restore(snapshot.state, snapshot.index); // Validate everything before replacing durable state.
         log_storage_.install_snapshot(snapshot);
@@ -153,10 +190,18 @@ Message server::handle_snapshot(Runtime& runtime, const Message& message) {
 
 void server::advance_commit(Runtime& runtime) {
     if (leadership_.role != Role::Leader || !runtime.leader_active) return;
-    std::vector<std::uint64_t> matches;
-    for (const auto& peer : runtime.peers) matches.push_back(runtime.replication.at(peer.id()).match_index());
-    commit_state_.commit_index = majority_commit_index(runtime.log, term_vote_state_.current_term,
-        commit_state_.commit_index, std::move(matches), runtime.snapshot.index);
+    const auto& membership = runtime.election.membership();
+    for (auto it = runtime.log.rbegin(); it != runtime.log.rend() && it->index > commit_state_.commit_index; ++it) {
+        if (it->term != term_vote_state_.current_term) break;
+        if (membership.quorum([&](auto id) {
+                if (id == config_.id) return true;
+                const auto peer = runtime.replication.find(id);
+                return peer != runtime.replication.end() && peer->second.match_index() >= it->index;
+            })) {
+            commit_state_.commit_index = it->index;
+            break;
+        }
+    }
     persist_commit_and_apply(runtime);
 }
 
@@ -208,6 +253,16 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     spdlog::info("Recovered persistent state term={} voted_for={}",
                  term_vote_state_.current_term, term_vote_state_.voted_for.value_or(0));
     auto runtime = std::make_unique<Runtime>(config, term_vote_state_, log_state_, leadership_);
+    runtime->initial_membership = runtime->election.membership();
+    if (const auto saved = storage_directory_->read("voters")) {
+        runtime->initial_membership = Membership::decode(*saved);
+        if (runtime->initial_membership.joint()
+            || runtime->initial_membership.old_voters != runtime->election.membership().old_voters) {
+            throw StorageError("Bootstrap voters cannot change after initialization");
+        }
+    } else {
+        storage_directory_->replace("voters", "voters.tmp", runtime->initial_membership.encode());
+    }
     runtime->log = std::move(log);
     runtime->snapshot = snapshot;
     if (snapshot.index) runtime->machine.restore(snapshot.state, snapshot.index);
@@ -254,7 +309,11 @@ void server::handle_request(Runtime& runtime) {
         response.id = message.id;
         if (message.type == zmq_template::MessageType::request_vote) {
             const auto request = zmq_template::decode_vote_request(message);
-            const auto result = voteFor(request, term_vote_state_, log_state_, leadership_, runtime.election_timer);
+            const auto& voters = runtime.election.membership();
+            const bool managed = !config_.voters.empty() || runtime.membership_index != 0;
+            const auto result = managed && (!voters.contains(config_.id) || !voters.contains(request.candidate_id))
+                ? RequestVoteResponse{term_vote_state_.current_term, false}
+                : voteFor(request, term_vote_state_, log_state_, leadership_, runtime.election_timer);
             persist_state();
             response = zmq_template::make_vote_response(message.id, result);
             spdlog::info("RequestVote candidate={} request_term={} current_term={} granted={} role={}",
@@ -274,6 +333,30 @@ void server::handle_request(Runtime& runtime) {
             response = zmq_template::make_heartbeat_response(message.id, result.response);
             spdlog::debug("Heartbeat received leader={} term={} success={}",
                           request.leader_id, request.term, result.response.success);
+        } else if (message.type == MessageType::configure_membership) {
+            if (leadership_.role != Role::Leader || !runtime.leader_active) throw std::invalid_argument("Not leader");
+            const auto& current = runtime.election.membership();
+            if (current.joint() || runtime.membership_index > commit_state_.commit_index) {
+                throw std::invalid_argument("Membership change in progress");
+            }
+            const auto committed = commit_state_.commit_index;
+            const auto committed_term = committed == runtime.snapshot.index ? runtime.snapshot.term
+                : runtime.log.at(committed - runtime.snapshot.index - 1).term;
+            if (committed_term != term_vote_state_.current_term) throw std::invalid_argument("Leader has not committed its term");
+            auto target = parse_voters(message.payload);
+            if (target == current.old_voters) {
+                reply(runtime, route, {MessageType::acknowledgement, message.id, "ALREADY COMMITTED"});
+                return;
+            }
+            for (auto id : target) {
+                if (id == config_.id || current.contains(id)) continue;
+                const auto peer = runtime.replication.find(id);
+                if (peer == runtime.replication.end()) throw std::invalid_argument("Unknown voter in peer catalog");
+                if (peer->second.match_index() < committed) throw std::invalid_argument("New voter has not caught up");
+            }
+            append_membership(runtime, {current.old_voters, std::move(target)});
+            advance_commit(runtime);
+            response = {MessageType::acknowledgement, message.id, "CHANGE STARTED"};
         } else if (message.type == zmq_template::MessageType::text
                    || message.type == zmq_template::MessageType::client_request) {
             if (leadership_.role != Role::Leader || !runtime.leader_active
@@ -381,7 +464,7 @@ void server::process_peer_timeouts(Runtime& runtime) {
 
 void server::tick_follower(Runtime& runtime) {
     runtime.leader_active = false;
-    if (runtime.election_timer.expired()) start_election(runtime);
+    if (runtime.election.membership().contains(config_.id) && runtime.election_timer.expired()) start_election(runtime);
 }
 
 void server::tick_candidate(Runtime& runtime) {
@@ -396,6 +479,7 @@ void server::start_election(Runtime& runtime) {
     spdlog::info("Node {} starts election term={} self_vote={} next_timeout={}ms",
                  config_.id, request.term, config_.id, runtime.election_timer.timeout().count());
     for (auto& peer : runtime.peers) {
+        if (!runtime.election.membership().contains(peer.id())) continue;
         try {
             peer.requestVoteFor(request, ++runtime.next_rpc_id);
             spdlog::debug("requestVoteFor peer={} term={}", peer.id(), request.term);
@@ -428,6 +512,13 @@ void server::tick_leader(Runtime& runtime) {
         runtime.leader_active = true;
         runtime.heartbeat_term = term_vote_state_.current_term;
         advance_commit(runtime);
+    }
+    if (leadership_.role != Role::Leader) return;
+    const auto& membership = runtime.election.membership();
+    if (membership.joint() && runtime.membership_index <= commit_state_.commit_index) {
+        append_membership(runtime, {membership.new_voters, {}});
+        advance_commit(runtime);
+        if (leadership_.role != Role::Leader) return;
     }
     if (runtime.heartbeat_timer.tick()) {
         for (auto& peer : runtime.peers) {
@@ -463,7 +554,8 @@ int server::run(const NodeConfig& config) {
     auto runtime = initialize(config);
     while (!stop_requested) {
         auto wait = leadership_.role == Role::Leader ? std::chrono::milliseconds{100}
-            : std::min(runtime->election_timer.remaining(), std::chrono::milliseconds{100});
+            : std::min(runtime->election.membership().contains(config_.id) ? runtime->election_timer.remaining()
+                : std::chrono::milliseconds{100}, std::chrono::milliseconds{100});
         if (leadership_.role == Role::Leader) {
             wait = runtime->leader_active && runtime->heartbeat_term == term_vote_state_.current_term
                 ? std::min(wait, runtime->heartbeat_timer.remaining()) : std::chrono::milliseconds{0};

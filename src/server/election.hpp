@@ -3,6 +3,7 @@
 #include "server/rpc/vote_rpc.hpp"
 #include "server/config/node_config.hpp"
 #include "server/state.hpp"
+#include "server/membership.hpp"
 
 #include <limits>
 #include <set>
@@ -15,9 +16,15 @@ public:
     Election(const NodeConfig& config, TermVoteState& term_vote, const LogState& log_state,
              LeadershipState& leadership)
         : node_id_(config.id), term_vote_(term_vote), log_state_(log_state), leadership_(leadership) {
-        members_.insert(config.id);
-        for (const auto& peer : config.peers) members_.insert(peer.id);
+        membership_.old_voters = config.voters;
+        if (membership_.old_voters.empty()) {
+            membership_.old_voters.insert(config.id);
+            for (const auto& peer : config.peers) membership_.old_voters.insert(peer.id);
+        }
     }
+
+    void configure(const Membership& membership) { membership_ = membership; }
+    const Membership& membership() const { return membership_; }
 
     RequestVoteRequest start() {
         if (term_vote_.current_term == std::numeric_limits<std::uint64_t>::max()) {
@@ -34,7 +41,7 @@ public:
 
     void handle_vote_response(std::uint64_t peer_id, std::uint64_t request_term,
                         const RequestVoteResponse& response) {
-        if (peer_id == node_id_ || members_.count(peer_id) == 0) return;
+        if (peer_id == node_id_ || !membership_.contains(peer_id)) return;
         if (become_follower_if_higher_term(response.term)) return;
         if (leadership_.role != Role::Candidate || request_term != term_vote_.current_term
             || response.term != term_vote_.current_term || !response.vote_granted) return;
@@ -43,7 +50,7 @@ public:
     }
 
     std::size_t votes() const { return votes_.size(); }
-    std::size_t majority() const { return members_.size() / 2 + 1; }
+    std::size_t majority() const { return membership_.old_voters.size() / 2 + 1; }
 
     bool become_follower_if_higher_term(std::uint64_t term) {
         if (term <= term_vote_.current_term) return false;
@@ -57,7 +64,7 @@ public:
 
 private:
     void promote_if_majority() {
-        if (votes_.size() >= majority()) {
+        if (membership_.quorum([&](auto id) { return votes_.count(id); })) {
             leadership_.role = Role::Leader;
             leadership_.leader_id = node_id_;
         }
@@ -66,7 +73,7 @@ private:
     TermVoteState& term_vote_;
     const LogState& log_state_;
     LeadershipState& leadership_;
-    std::set<std::uint64_t> members_;
+    Membership membership_;
     std::set<std::uint64_t> votes_;
 };
 

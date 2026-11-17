@@ -473,7 +473,10 @@ class CommittedCluster : public PersistentServer {
 protected:
     virtual bool use_fault_proxies() const { return false; }
     virtual std::string snapshot_threshold() const { return "0"; }
+    virtual std::string bootstrap_voters() const { return {}; }
     virtual bool slow_storage() const { return false; }
+    virtual bool start_on_setup() const { return true; }
+    virtual void customize_node(int, std::vector<std::string>&) const {}
     void SetUp() override {
         PersistentServer::SetUp();
         nodes.resize(3);
@@ -488,7 +491,7 @@ protected:
                 proxies[i][j] = std::make_unique<test::FaultProxy>(proxy_endpoints[i][j], endpoints[j]);
             }
         }
-        for (int i = 0; i < 3; ++i) start_node(i);
+        if (start_on_setup()) for (int i = 0; i < 3; ++i) start_node(i);
     }
     void TearDown() override {
         nodes.clear();
@@ -507,6 +510,8 @@ protected:
             if (i != j) args.insert(args.end(), {"--peer", std::to_string(j + 1) + "="
                 + (use_fault_proxies() ? proxy_endpoints[i][j] : endpoints[j])});
         }
+        if (!bootstrap_voters().empty()) args.insert(args.end(), {"--voters", bootstrap_voters()});
+        customize_node(i, args);
         nodes[i] = std::make_unique<ServerProcess>(std::move(args), root / ("cluster-" + std::to_string(i) + ".log"));
     }
     Message command(int i, const std::string& text, int timeout = 3000) {
@@ -519,11 +524,11 @@ protected:
         send_message(client, {MessageType::text, 42, text});
         return receive_message(client);
     }
-    int find_leader() {
+    int find_leader(int excluded = -1) {
         const auto deadline = std::chrono::steady_clock::now() + 10s;
         while (std::chrono::steady_clock::now() < deadline) {
             for (int i = 0; i < 3; ++i) {
-                if (!nodes[i]) continue;
+                if (i == excluded || !nodes[i]) continue;
                 try {
                     if (command(i, "GET probe", 500).type == MessageType::acknowledgement) return i;
                 } catch (const std::runtime_error&) {}
@@ -564,6 +569,74 @@ protected:
         }
     }
 };
+
+class MembershipCluster : public CommittedCluster {
+protected:
+    std::string bootstrap_voters() const override { return "1,2"; }
+    Message change(int node, const std::string& voters) {
+        zmq::context_t context{1};
+        zmq::socket_t socket{context, zmq::socket_type::req};
+        configure_socket(socket);
+        socket.set(zmq::sockopt::linger, 0);
+        socket.connect(endpoints[node]);
+        send_message(socket, {MessageType::configure_membership, 1, voters});
+        return receive_message(socket);
+    }
+    bool wait_for_membership(int node, const std::string& voters) {
+        const auto deadline = std::chrono::steady_clock::now() + 5s;
+        while (std::chrono::steady_clock::now() < deadline) {
+            if (change(node, voters).payload == "ALREADY COMMITTED") return true;
+            std::this_thread::sleep_for(20ms);
+        }
+        return false;
+    }
+};
+
+TEST_F(MembershipCluster, PromotesLearnerThenRemovesLeaderAndRecoversNewQuorum) {
+    const auto old = find_leader();
+    ASSERT_NE(old, 2);
+    ASSERT_EQ(command(old, "SET key before").payload, "OK");
+    ASSERT_TRUE(wait_for_commit(2, read_index(directories[old] / "commit.json")));
+    ASSERT_EQ(change(old, "1,2,3").payload, "CHANGE STARTED");
+    ASSERT_TRUE(wait_for_membership(old, "1,2,3"));
+    const auto remaining = old == 0 ? "2,3" : "1,3";
+    ASSERT_EQ(change(old, remaining).payload, "CHANGE STARTED");
+    const auto successor = find_leader(old);
+    EXPECT_EQ(command(old, "GET key").type, MessageType::error);
+    ASSERT_TRUE(wait_for_membership(successor, remaining));
+    for (auto& node : nodes) node.reset();
+    for (int i = 0; i < 3; ++i) if (i != old) start_node(i);
+    const auto recovered = find_leader();
+    EXPECT_NE(recovered, old);
+    EXPECT_EQ(command(recovered, "GET key").payload, "VALUE before");
+}
+
+class JointRecoveryCluster : public MembershipCluster {
+protected:
+    bool start_on_setup() const override { return false; }
+    void customize_node(int node, std::vector<std::string>& args) const override {
+        if (node == 2) return;
+        for (std::size_t i = 1; i + 1 < args.size(); ++i) {
+            if (args[i] == "--election-timeout-min-ms") args[i + 1] = "2000";
+            if (args[i] == "--election-timeout-max-ms") args[i + 1] = "3000";
+        }
+    }
+};
+
+TEST_F(JointRecoveryCluster, NewlyAddedVoterCanLeadBeforeJointEntryCommits) {
+    for (int i = 0; i < 3; ++i) {
+        auto directory = std::make_shared<StorageDirectory>(directories[i]);
+        RaftStateStorage state{directory};
+        LogStorage log{directory};
+        state.save_term_vote({1, std::nullopt});
+        log.append({{1, 1, "SET key before"}, {2, 1, std::string{"\0MEM1", 5} + "1,2/3"}});
+        state.save_commit({1, 1});
+    }
+    for (int i = 0; i < 3; ++i) start_node(i);
+    EXPECT_EQ(find_leader(), 2);
+    ASSERT_TRUE(wait_for_membership(2, "3"));
+    EXPECT_EQ(command(2, "GET key").payload, "VALUE before");
+}
 
 class SnapshotCluster : public CommittedCluster {
 protected:

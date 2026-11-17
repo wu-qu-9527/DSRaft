@@ -1,5 +1,6 @@
 #include "server/state_machine/key_value_state_machine.hpp"
 #include "common/client_request.hpp"
+#include "server/membership.hpp"
 #include "common/binary_codec.hpp"
 
 #include <stdexcept>
@@ -44,7 +45,7 @@ std::optional<std::string> KeyValueStateMachine::get(const std::string& key) con
 }
 
 std::string KeyValueStateMachine::execute(const std::string& command) {
-    if (command.empty()) return {}; // Internal no-op.
+    if (command.empty() || is_membership(command)) return {}; // Internal no-op.
     try {
         if (!is_client_request(command)) return execute_business(command);
         const auto request = decode_client_request(command);

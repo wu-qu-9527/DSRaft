@@ -38,6 +38,7 @@ add_library(zmq_server_core
     src/server/storage/json_record.cpp
     src/server/config/config_parser.cpp
     src/server/rpc/vote_rpc.cpp
+    src/server/rpc/snapshot_rpc.cpp
     src/server/rpc/heartbeat_rpc.cpp)
 add_library(zmq_template::server_core ALIAS zmq_server_core)
 target_link_libraries(zmq_server_core
@@ -60,6 +61,7 @@ if(BUILD_TESTING)
     include(cmake/Testing.cmake)
     find_package(Threads REQUIRED)
     add_executable(zmq_tests
+        tests/snapshot_test.cpp
         tests/client_retry_test.cpp
         tests/persistence_integration_test.cpp
         tests/state_storage_test.cpp

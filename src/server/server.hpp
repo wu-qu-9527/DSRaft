@@ -33,6 +33,8 @@ private:
     void persist_commit_and_apply(Runtime& runtime);
     void advance_commit(Runtime& runtime);
     void complete_pending(Runtime& runtime);
+    void compact(Runtime& runtime);
+    Message handle_snapshot(Runtime& runtime, const Message& message);
 
     int run(const NodeConfig& config);
 

@@ -48,6 +48,8 @@ NodeConfig parse_node_config(int argc, char* argv[]) {
             config.heartbeat_timeout = parse_milliseconds(value);
         } else if (option == "--vote-timeout-ms") {
             config.vote_timeout = parse_milliseconds(value);
+        } else if (option == "--snapshot-threshold") {
+            config.snapshot_threshold = value == "0" ? 0 : parse_node_id(value);
         } else if (option == "--election-timeout-min-ms") {
             config.election_timeout_min = parse_milliseconds(value);
         } else if (option == "--election-timeout-max-ms") {

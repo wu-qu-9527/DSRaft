@@ -472,6 +472,8 @@ TEST_F(PersistentServer, CorruptStateRefusesStartupBeforeListening) {
 class CommittedCluster : public PersistentServer {
 protected:
     virtual bool use_fault_proxies() const { return false; }
+    virtual std::string snapshot_threshold() const { return "0"; }
+    virtual bool slow_storage() const { return false; }
     void SetUp() override {
         PersistentServer::SetUp();
         nodes.resize(3);
@@ -496,7 +498,11 @@ protected:
     void start_node(int i) {
         std::vector<std::string> args{endpoints[i], "--node-id", std::to_string(i + 1),
             "--data-dir", directories[i].string(), "--heartbeat-interval-ms", "10",
-            "--election-timeout-min-ms", "200", "--election-timeout-max-ms", "400"};
+            "--snapshot-threshold", snapshot_threshold(),
+            "--election-timeout-min-ms", slow_storage() ? "2000" : "200",
+            "--election-timeout-max-ms", slow_storage() ? "3000" : "400",
+            "--heartbeat-timeout-ms", slow_storage() ? "1500" : "100",
+            "--vote-timeout-ms", slow_storage() ? "1500" : "100"};
         for (int j = 0; j < 3; ++j) {
             if (i != j) args.insert(args.end(), {"--peer", std::to_string(j + 1) + "="
                 + (use_fault_proxies() ? proxy_endpoints[i][j] : endpoints[j])});
@@ -514,7 +520,8 @@ protected:
         return receive_message(client);
     }
     int find_leader() {
-        for (int attempt = 0; attempt < 40; ++attempt) {
+        const auto deadline = std::chrono::steady_clock::now() + 10s;
+        while (std::chrono::steady_clock::now() < deadline) {
             for (int i = 0; i < 3; ++i) {
                 if (!nodes[i]) continue;
                 try {
@@ -557,6 +564,70 @@ protected:
         }
     }
 };
+
+class SnapshotCluster : public CommittedCluster {
+protected:
+    std::string snapshot_threshold() const override { return "4"; }
+    bool slow_storage() const override { return true; }
+    void TearDown() override {
+        if (HasFailure()) for (int i = 0; i < 3; ++i) {
+            std::ifstream input{root / ("cluster-" + std::to_string(i) + ".log")};
+            std::cerr << input.rdbuf();
+        }
+        CommittedCluster::TearDown();
+    }
+};
+
+TEST_F(SnapshotCluster, OfflineFollowerInstallsChunkedSnapshotAndRestoresSessionsOnRestart) {
+    SCOPED_TRACE("snapshot cluster lifecycle");
+    const int leader = find_leader();
+    const int offline = (leader + 1) % 3;
+    nodes[offline].reset();
+    zmq::context_t context{1};
+    const std::string large(150000, 'x');
+    ASSERT_EQ(submit_request(context, {endpoints[leader]}, {"alice", 1, "SET large " + large}, 5s, 2s).payload, "OK");
+    for (int i = 1; i <= 9; ++i) {
+        SCOPED_TRACE("write " + std::to_string(i));
+        ASSERT_EQ(submit_request(context, {endpoints[leader]}, {"writer", static_cast<std::uint64_t>(i), "SET key " + std::to_string(i)}, 5s, 2s).payload, "OK");
+    }
+    const auto committed = read_index(directories[leader] / "commit.json");
+    start_node(offline);
+    ASSERT_TRUE(wait_for_commit(offline, committed));
+    for (auto& node : nodes) node.reset();
+    {
+        auto directory = std::make_shared<StorageDirectory>(directories[offline]);
+        LogStorage log{directory};
+        RaftStateStorage state{directory};
+        const auto snapshot = log.load_snapshot();
+        ASSERT_GT(snapshot.index, 0u);
+        KeyValueStateMachine machine;
+        machine.restore(snapshot.state, snapshot.index);
+        machine.apply_committed(log.load(), state.load_commit().index, snapshot.index);
+        EXPECT_EQ(machine.get("large"), large);
+        EXPECT_EQ(machine.get("key"), "9");
+    }
+    for (int i = 0; i < 3; ++i) start_node(i);
+    EXPECT_EQ(submit_request(context, endpoints, {"writer", 9, "SET key 9"}, 8s, 2s).payload, "OK");
+    EXPECT_EQ(submit_request(context, endpoints, {"reader", 1, "GET large"}, 5s, 2s).payload, "VALUE " + large);
+}
+
+TEST_F(PersistentServer, RecoversSnapshotWhenCommitCheckpointStillPredatesIt) {
+    {
+        auto directory = std::make_shared<StorageDirectory>(data_dir);
+        LogStorage log{directory};
+        RaftStateStorage state{directory};
+        state.save_term_vote({2, std::nullopt});
+        const std::vector<LogEntry> entries{{1, 2, "SET key snapshot"}};
+        log.append(entries);
+        KeyValueStateMachine machine;
+        machine.apply_committed(entries, 1);
+        log.install_snapshot({1, 2, machine.snapshot(), {}});
+        // Simulate crash after atomic snapshot replacement but before commit.json update.
+    }
+    start(true);
+    std::this_thread::sleep_for(200ms);
+    EXPECT_EQ(call({MessageType::text, 1, "GET key"}).payload, "VALUE snapshot");
+}
 
 TEST_F(PartitionedCluster, LiveOldLeaderCannotCommitAndRepairsItsSuffixAfterHealing) {
     const int old = find_leader();

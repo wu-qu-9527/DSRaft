@@ -55,6 +55,12 @@ struct server::Runtime {
     std::vector<PendingCommand> pending;
     std::unordered_map<std::uint64_t, LogReplication> replication;
     std::uint32_t next_rpc_id{0};
+    Snapshot snapshot;
+    struct SnapshotTransfer {
+        std::uint64_t index{0}, term{0}, leader{0}, total{0}, offset{0};
+        std::string bytes;
+    } incoming_snapshot;
+    std::unordered_map<std::uint64_t, SnapshotTransfer> outgoing_snapshots;
 };
 
 server::server(NodeConfig config)
@@ -75,18 +81,74 @@ void server::persist_state() {
 
 void server::persist_commit_and_apply(Runtime& runtime) {
     if (commit_state_.commit_index > persisted_commit_.index) {
-        const PersistentCommit next{commit_state_.commit_index, runtime.log.at(commit_state_.commit_index - 1).term};
+        const PersistentCommit next{commit_state_.commit_index, commit_state_.commit_index == runtime.snapshot.index
+            ? runtime.snapshot.term : runtime.log.at(commit_state_.commit_index - runtime.snapshot.index - 1).term};
         state_storage_.save_commit(next);
         persisted_commit_ = next;
     }
-    const auto applied = runtime.machine.apply_committed(runtime.log, commit_state_.commit_index);
+    const auto applied = runtime.machine.apply_committed(runtime.log, commit_state_.commit_index, runtime.snapshot.index);
     for (const auto& result : applied) {
         for (auto& pending : runtime.pending) {
-            if (pending.index == result.index && pending.term == runtime.log[result.index - 1].term) {
+            if (pending.index == result.index && pending.term == runtime.log[result.index - runtime.snapshot.index - 1].term) {
                 pending.result = result.result;
             }
         }
     }
+    compact(runtime);
+}
+
+void server::compact(Runtime& runtime) {
+    const auto applied = runtime.machine.last_applied();
+    if (config_.snapshot_threshold == 0 || applied - runtime.snapshot.index < config_.snapshot_threshold) return;
+    const auto term = runtime.log.at(applied - runtime.snapshot.index - 1).term;
+    Snapshot snapshot{applied, term, runtime.machine.snapshot(), runtime.snapshot.configuration};
+    log_storage_.install_snapshot(snapshot);
+    runtime.log.erase(runtime.log.begin(), runtime.log.begin() + static_cast<std::size_t>(applied - runtime.snapshot.index));
+    runtime.snapshot = std::move(snapshot);
+    log_state_.snapshot_index = applied;
+    log_state_.snapshot_term = term;
+}
+
+Message server::handle_snapshot(Runtime& runtime, const Message& message) {
+    const auto request = decode_snapshot_request(message);
+    if (request.term < term_vote_state_.current_term) {
+        return make_snapshot_response(message.id, {term_vote_state_.current_term, false, 0});
+    }
+    if (request.term > term_vote_state_.current_term) {
+        term_vote_state_.current_term = request.term;
+        term_vote_state_.voted_for.reset();
+    }
+    leadership_ = {Role::Follower, request.leader_id};
+    runtime.election_timer.reset();
+    persist_state();
+    if (request.index <= commit_state_.commit_index) {
+        return make_snapshot_response(message.id, {term_vote_state_.current_term, true, request.offset + request.data.size()});
+    }
+    auto& incoming = runtime.incoming_snapshot;
+    if (request.offset == 0) incoming = {request.index, request.snapshot_term, request.leader_id, request.total, 0, {}};
+    if (incoming.index != request.index || incoming.term != request.snapshot_term || incoming.leader != request.leader_id
+        || incoming.total != request.total || incoming.bytes.size() != request.offset) {
+        return make_snapshot_response(message.id, {term_vote_state_.current_term, false, 0});
+    }
+    incoming.bytes += request.data;
+    const auto next = incoming.bytes.size();
+    if (next == request.total) {
+        auto snapshot = snapshot_from_payload(request.index, request.snapshot_term, incoming.bytes);
+        KeyValueStateMachine restored;
+        restored.restore(snapshot.state, snapshot.index); // Validate everything before replacing durable state.
+        log_storage_.install_snapshot(snapshot);
+        runtime.snapshot = std::move(snapshot);
+        runtime.log = log_storage_.load();
+        runtime.machine = std::move(restored);
+        log_state_.snapshot_index = runtime.snapshot.index;
+        log_state_.snapshot_term = runtime.snapshot.term;
+        log_state_.last_log_index = runtime.log.empty() ? runtime.snapshot.index : runtime.log.back().index;
+        log_state_.last_log_term = runtime.log.empty() ? runtime.snapshot.term : runtime.log.back().term;
+        commit_state_.commit_index = runtime.snapshot.index;
+        persist_commit_and_apply(runtime);
+        incoming = {};
+    }
+    return make_snapshot_response(message.id, {term_vote_state_.current_term, true, next});
 }
 
 void server::advance_commit(Runtime& runtime) {
@@ -94,7 +156,7 @@ void server::advance_commit(Runtime& runtime) {
     std::vector<std::uint64_t> matches;
     for (const auto& peer : runtime.peers) matches.push_back(runtime.replication.at(peer.id()).match_index());
     commit_state_.commit_index = majority_commit_index(runtime.log, term_vote_state_.current_term,
-        commit_state_.commit_index, std::move(matches));
+        commit_state_.commit_index, std::move(matches), runtime.snapshot.index);
     persist_commit_and_apply(runtime);
 }
 
@@ -135,25 +197,28 @@ std::unique_ptr<server::Runtime> server::initialize(const NodeConfig& config) {
     log_state_ = {};
     commit_state_ = {};
     leadership_ = {};
+    const auto snapshot = log_storage_.load_snapshot();
+    log_state_ = {snapshot.index, snapshot.term, snapshot.index, snapshot.term};
     auto log = log_storage_.load();
     if (!log.empty()) {
         log_state_.last_log_index = log.back().index;
         log_state_.last_log_term = log.back().term;
-        if (log_state_.last_log_term > term_vote_state_.current_term) {
-            throw StorageError("Persistent log term exceeds current term");
-        }
     }
+    if (log_state_.last_log_term > term_vote_state_.current_term) throw StorageError("Persistent log term exceeds current term");
     spdlog::info("Recovered persistent state term={} voted_for={}",
                  term_vote_state_.current_term, term_vote_state_.voted_for.value_or(0));
     auto runtime = std::make_unique<Runtime>(config, term_vote_state_, log_state_, leadership_);
     runtime->log = std::move(log);
+    runtime->snapshot = snapshot;
+    if (snapshot.index) runtime->machine.restore(snapshot.state, snapshot.index);
     persisted_commit_ = state_storage_.load_commit();
-    if (persisted_commit_.index > runtime->log.size()
-        || (persisted_commit_.index != 0 && runtime->log[persisted_commit_.index - 1].term != persisted_commit_.term)) {
+    if (persisted_commit_.index > log_state_.last_log_index
+        || (persisted_commit_.index > snapshot.index && runtime->log[persisted_commit_.index - snapshot.index - 1].term != persisted_commit_.term)
+        || (persisted_commit_.index == snapshot.index && persisted_commit_.term != snapshot.term)) {
         throw StorageError("Committed checkpoint does not match the persistent log");
     }
-    commit_state_.commit_index = persisted_commit_.index;
-    runtime->machine.apply_committed(runtime->log, commit_state_.commit_index);
+    commit_state_.commit_index = std::max(persisted_commit_.index, snapshot.index);
+    persist_commit_and_apply(*runtime);
     zmq_template::configure_socket(runtime->socket);
     // Poll owns the wait; a slow/disconnected peer must not block elections.
     runtime->socket.set(zmq::sockopt::rcvtimeo, 0);
@@ -194,13 +259,15 @@ void server::handle_request(Runtime& runtime) {
             response = zmq_template::make_vote_response(message.id, result);
             spdlog::info("RequestVote candidate={} request_term={} current_term={} granted={} role={}",
                          request.candidate_id, request.term, result.term, result.vote_granted, to_string(leadership_.role));
+        } else if (message.type == zmq_template::MessageType::install_snapshot) {
+            response = handle_snapshot(runtime, message);
         } else if (message.type == zmq_template::MessageType::heartbeat) {
             const auto request = zmq_template::decode_heartbeat_request(message);
             const auto result = handle_heartbeat(request, term_vote_state_, log_state_, commit_state_,
                 leadership_, runtime.election_timer, runtime.log);
             persist_state(); // A higher term must be durable before logs from that term.
             if (result.changed_from) {
-                const auto first = runtime.log.begin() + static_cast<std::size_t>(*result.changed_from - 1);
+                const auto first = runtime.log.begin() + static_cast<std::size_t>(*result.changed_from - runtime.snapshot.index - 1);
                 log_storage_.replace_suffix(*result.changed_from, {first, runtime.log.end()});
             }
             persist_commit_and_apply(runtime);
@@ -247,7 +314,25 @@ void server::handle_request(Runtime& runtime) {
 void server::handle_peer_response(Runtime& runtime, PeerRpc& peer) {
     try {
         const auto request_term = peer.request_term();
-        if (peer.request_type() == zmq_template::MessageType::heartbeat) {
+        if (peer.request_type() == MessageType::install_snapshot) {
+            const auto response = peer.receiveSnapshot();
+            if (runtime.election.become_follower_if_higher_term(response.term)) {
+                persist_state();
+                runtime.election_timer.reset();
+            }
+            if (leadership_.role == Role::Leader && request_term == term_vote_state_.current_term
+                && response.term == term_vote_state_.current_term && runtime.leader_active) {
+                auto& transfer = runtime.outgoing_snapshots.at(peer.id());
+                const auto expected = std::min<std::uint64_t>(transfer.offset + snapshot_chunk_size, transfer.bytes.size());
+                if (response.success && response.next_offset == expected) {
+                    transfer.offset = response.next_offset;
+                    if (transfer.offset == transfer.bytes.size()) {
+                        runtime.replication.at(peer.id()).acknowledge_snapshot(transfer.index);
+                        advance_commit(runtime);
+                    }
+                } else transfer.offset = 0;
+            }
+        } else if (peer.request_type() == zmq_template::MessageType::heartbeat) {
             const auto response = peer.receiveHeartbeat();
             if (runtime.election.become_follower_if_higher_term(response.term)) {
                 persist_state();
@@ -332,6 +417,7 @@ void server::tick_leader(Runtime& runtime) {
             peer.cancel();
             runtime.replication[peer.id()].reset(log_state_.last_log_index);
         }
+        runtime.outgoing_snapshots.clear();
         // Persist a current-term no-op before replication; never commit an old term by counting it alone.
         const LogEntry noop{log_state_.last_log_index + 1, term_vote_state_.current_term, {}};
         log_storage_.append({noop});
@@ -346,8 +432,22 @@ void server::tick_leader(Runtime& runtime) {
     if (runtime.heartbeat_timer.tick()) {
         for (auto& peer : runtime.peers) {
             if (peer.pending()) continue;
+            if (runtime.replication.at(peer.id()).next_index() <= runtime.snapshot.index) {
+                auto& transfer = runtime.outgoing_snapshots[peer.id()];
+                if (transfer.index != runtime.snapshot.index) {
+                    transfer = {runtime.snapshot.index, runtime.snapshot.term, config_.id, 0, 0, snapshot_payload(runtime.snapshot)};
+                }
+                try {
+                    peer.requestSnapshot({term_vote_state_.current_term, config_.id, transfer.index, transfer.term,
+                        transfer.offset, transfer.bytes.size(), transfer.bytes.substr(transfer.offset, snapshot_chunk_size)}, ++runtime.next_rpc_id);
+                } catch (const std::exception& error) {
+                    peer.cancel();
+                    spdlog::warn("InstallSnapshot send failed: {}", error.what());
+                }
+                continue;
+            }
             const auto request = runtime.replication.at(peer.id()).make_request(runtime.log,
-                term_vote_state_.current_term, config_.id, commit_state_.commit_index);
+                term_vote_state_.current_term, config_.id, commit_state_.commit_index, runtime.snapshot.index, runtime.snapshot.term);
             try {
                 peer.requestHeartbeat(request, ++runtime.next_rpc_id);
                 spdlog::debug("Heartbeat sent peer={} term={}", peer.id(), request.term);

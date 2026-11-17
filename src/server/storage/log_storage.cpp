@@ -57,11 +57,14 @@ LogStorage::LogStorage(std::shared_ptr<StorageDirectory> directory) : directory_
 std::vector<LogEntry> LogStorage::load() const {
     const auto data = read_json_record(*directory_, "log.json", "raft-log");
     if (!data) return {};
-    if (data->size() != 1 || !data->contains("entries") || !data->at("entries").is_array()) {
+    if ((data->size() != 1 && !(data->size() == 2 && data->contains("snapshot")))
+        || !data->contains("entries") || !data->at("entries").is_array()) {
         throw StorageError("Invalid persistent log fields");
     }
     std::vector<LogEntry> entries;
-    std::uint64_t previous_term = 0;
+    const auto snapshot = load_snapshot();
+    std::uint64_t previous_term = snapshot.term;
+    std::uint64_t previous_index = snapshot.index;
     for (const auto& item : data->at("entries")) {
         if (!item.is_object() || item.size() != 3
             || item.contains("command") == item.contains("command_hex")) {
@@ -72,14 +75,27 @@ std::vector<LogEntry> LogStorage::load() const {
         if (!command.is_string()) throw StorageError("Invalid persistent log command");
         entry.command = command.get<std::string>();
         if (item.contains("command_hex")) entry.command = decode_hex(entry.command);
-        validate_log_entry(entry, entries.size(), previous_term);
+        validate_log_entry(entry, previous_index, previous_term);
+        previous_index = entry.index;
         previous_term = entry.term;
         entries.push_back(std::move(entry));
     }
     return entries;
 }
 
-void LogStorage::save(const std::vector<LogEntry>& entries) {
+Snapshot LogStorage::load_snapshot() const {
+    const auto data = read_json_record(*directory_, "log.json", "raft-log");
+    if (!data || !data->contains("snapshot")) return {};
+    const auto& value = data->at("snapshot");
+    if (!value.is_object() || value.size() != 4 || !value.contains("state_hex") || !value["state_hex"].is_string()
+        || !value.contains("configuration") || !value["configuration"].is_string()) throw StorageError("Invalid snapshot");
+    Snapshot snapshot{json_u64(value, "index"), json_u64(value, "term"),
+        decode_hex(value["state_hex"].get<std::string>()), value["configuration"].get<std::string>()};
+    if (snapshot.index == 0 || snapshot.term == 0) throw StorageError("Invalid snapshot boundary");
+    return snapshot;
+}
+
+void LogStorage::save(const std::vector<LogEntry>& entries, const Snapshot& snapshot) {
     auto items = nlohmann::json::array();
     for (const auto& entry : entries) {
         nlohmann::json item{{"index", entry.index}, {"term", entry.term}};
@@ -92,21 +108,40 @@ void LogStorage::save(const std::vector<LogEntry>& entries) {
         }
         items.push_back(std::move(item));
     }
-    write_json_record(*directory_, "log.json", "log.tmp", "raft-log", {{"entries", std::move(items)}});
+    nlohmann::json data{{"entries", std::move(items)}};
+    if (snapshot.index != 0) data["snapshot"] = {{"index", snapshot.index}, {"term", snapshot.term},
+        {"state_hex", encode_hex(snapshot.state)}, {"configuration", snapshot.configuration}};
+    write_json_record(*directory_, "log.json", "log.tmp", "raft-log", std::move(data));
+}
+
+void LogStorage::install_snapshot(const Snapshot& snapshot) {
+    const auto old = load_snapshot();
+    if (snapshot.index == 0 || snapshot.term == 0 || snapshot.index < old.index || snapshot.term < old.term
+        || (snapshot.index == old.index && (snapshot.term != old.term || snapshot.state != old.state
+            || snapshot.configuration != old.configuration))) throw StorageError("Snapshot must not move backwards or change identity");
+    const auto log = load();
+    std::vector<LogEntry> suffix;
+    if (snapshot.index == old.index && snapshot.term == old.term) suffix = log;
+    else if (snapshot.index > old.index && snapshot.index - old.index <= log.size()
+             && log[snapshot.index - old.index - 1].term == snapshot.term) {
+        suffix.assign(log.begin() + static_cast<std::size_t>(snapshot.index - old.index), log.end());
+    }
+    save(suffix, snapshot);
 }
 
 void LogStorage::append(const std::vector<LogEntry>& entries) {
     auto log = load();
     if (entries.empty()) return;
-    auto previous_index = log.empty() ? 0 : log.back().index;
-    auto previous_term = log.empty() ? 0 : log.back().term;
+    const auto snapshot = load_snapshot();
+    auto previous_index = log.empty() ? snapshot.index : log.back().index;
+    auto previous_term = log.empty() ? snapshot.term : log.back().term;
     for (const auto& entry : entries) {
         validate_log_entry(entry, previous_index, previous_term);
         previous_index = entry.index;
         previous_term = entry.term;
     }
     log.insert(log.end(), entries.begin(), entries.end());
-    save(log);
+    save(log, snapshot);
 }
 
 void LogStorage::truncate_suffix(std::uint64_t first_index) {
@@ -115,18 +150,19 @@ void LogStorage::truncate_suffix(std::uint64_t first_index) {
 
 void LogStorage::replace_suffix(std::uint64_t first_index, const std::vector<LogEntry>& entries) {
     auto log = load();
-    if (first_index == 0 || first_index - 1 > log.size()) throw StorageError("Invalid log truncation index");
-    if (first_index - 1 == log.size() && entries.empty()) return;
-    log.resize(static_cast<std::size_t>(first_index - 1));
-    auto previous_index = log.empty() ? 0 : log.back().index;
-    auto previous_term = log.empty() ? 0 : log.back().term;
+    const auto snapshot = load_snapshot();
+    if (first_index <= snapshot.index || first_index - snapshot.index - 1 > log.size()) throw StorageError("Invalid log truncation index");
+    if (first_index - snapshot.index - 1 == log.size() && entries.empty()) return;
+    log.resize(static_cast<std::size_t>(first_index - snapshot.index - 1));
+    auto previous_index = log.empty() ? snapshot.index : log.back().index;
+    auto previous_term = log.empty() ? snapshot.term : log.back().term;
     for (const auto& entry : entries) {
         validate_log_entry(entry, previous_index, previous_term);
         previous_index = entry.index;
         previous_term = entry.term;
     }
     log.insert(log.end(), entries.begin(), entries.end());
-    save(log);
+    save(log, snapshot);
 }
 
 } // namespace zmq_template::server

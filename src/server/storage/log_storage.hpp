@@ -17,6 +17,9 @@ public:
 
     // Missing log means empty; malformed logs are fatal. Indices start at 1.
     std::vector<LogEntry> load() const;
+    Snapshot load_snapshot() const;
+    // The snapshot is a committed prefix. Replace it and its suffix in one atomic record.
+    void install_snapshot(const Snapshot& snapshot);
     // Append contiguous entries with positive, nondecreasing terms, then sync.
     void append(const std::vector<LogEntry>& entries);
     // Remove first_index and all later entries; last_index + 1 is a no-op.
@@ -26,7 +29,7 @@ public:
     void replace_suffix(std::uint64_t first_index, const std::vector<LogEntry>& entries);
 
 private:
-    void save(const std::vector<LogEntry>& entries);
+    void save(const std::vector<LogEntry>& entries, const Snapshot& snapshot);
     std::shared_ptr<StorageDirectory> directory_;
 };
 

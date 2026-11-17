@@ -16,13 +16,15 @@ public:
     }
 
     HeartbeatRequest make_request(const std::vector<LogEntry>& log, std::uint64_t term,
-                                  std::uint64_t leader_id, std::uint64_t commit_index) {
+                                  std::uint64_t leader_id, std::uint64_t commit_index,
+                                  std::uint64_t base_index = 0, std::uint64_t base_term = 0) {
         const auto previous = next_index_ - 1;
+        if (previous < base_index) throw std::logic_error("Follower requires snapshot");
         HeartbeatRequest request{term, leader_id, previous,
-            previous == 0 ? 0 : log.at(previous - 1).term, commit_index, {}};
+            previous == base_index ? base_term : log.at(previous - base_index - 1).term, commit_index, {}};
         std::size_t bytes = 48;
         // Bound both payload size and entry count so each peer gets incremental batches.
-        for (std::size_t i = static_cast<std::size_t>(previous); i < log.size() && request.entries.size() < 128; ++i) {
+        for (std::size_t i = static_cast<std::size_t>(previous - base_index); i < log.size() && request.entries.size() < 128; ++i) {
             if (log[i].command.size() > max_payload_size - 48 - 24) {
                 throw std::length_error("A log command is too large for AppendEntries");
             }
@@ -45,6 +47,10 @@ public:
     }
 
     std::uint64_t next_index() const { return next_index_; }
+    void acknowledge_snapshot(std::uint64_t index) {
+        match_index_ = std::max(match_index_, index);
+        next_index_ = match_index_ + 1;
+    }
     std::uint64_t match_index() const { return match_index_; }
 
 private:

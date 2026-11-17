@@ -19,7 +19,10 @@ class KeyValueStateMachine {
 public:
     // Empty log commands are reserved for internal no-op entries.
     static void validate_command(const std::string& command);
-    std::vector<AppliedResult> apply_committed(const std::vector<LogEntry>& log, std::uint64_t commit_index);
+    std::vector<AppliedResult> apply_committed(const std::vector<LogEntry>& log, std::uint64_t commit_index,
+                                             std::uint64_t base_index = 0);
+    std::string snapshot() const;
+    void restore(const std::string& bytes, std::uint64_t index);
     std::uint64_t last_applied() const { return last_applied_; }
     std::optional<std::string> get(const std::string& key) const;
 

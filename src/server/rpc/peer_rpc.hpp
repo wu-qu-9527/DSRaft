@@ -3,6 +3,7 @@
 #include "common/zmq_transport.hpp"
 #include "server/rpc/vote_rpc.hpp"
 #include "server/rpc/heartbeat_rpc.hpp"
+#include "server/rpc/snapshot_rpc.hpp"
 #include "server/config/node_config.hpp"
 
 #include <chrono>
@@ -37,6 +38,15 @@ public:
 
     HeartbeatResponse receiveHeartbeat() {
         const auto response = decode_heartbeat_response(receive_response(MessageType::heartbeat));
+        cancel();
+        return response;
+    }
+
+    void requestSnapshot(const SnapshotRequest& request, std::uint32_t rpc_id) {
+        start_call(make_snapshot_request(rpc_id, request), request.term, Clock::now(), heartbeat_timeout_);
+    }
+    SnapshotResponse receiveSnapshot() {
+        const auto response = decode_snapshot_response(receive_response(MessageType::install_snapshot));
         cancel();
         return response;
     }

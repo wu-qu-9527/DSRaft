@@ -29,16 +29,18 @@ inline HeartbeatResult handle_heartbeat(
     leadership.role = Role::Follower;
     leadership.leader_id = request.leader_id;
     timer.reset(now);
-    if (request.prev_log_index > log.size()
-        || (request.prev_log_index != 0 && log[request.prev_log_index - 1].term != request.prev_log_term)
+    const auto base = log_state.snapshot_index;
+    if (request.prev_log_index < base || request.prev_log_index - base > log.size()
+        || (request.prev_log_index == base && request.prev_log_term != log_state.snapshot_term)
+        || (request.prev_log_index > base && log[request.prev_log_index - base - 1].term != request.prev_log_term)
         || (request.prev_log_index == 0 && request.prev_log_term != 0)) {
         return {{term_vote.current_term, false}, std::nullopt};
     }
     std::size_t first_new = 0;
     while (first_new < request.entries.size()) {
         const auto& entry = request.entries[first_new];
-        if (entry.index > log.size()) break;
-        const auto& local = log[entry.index - 1];
+        if (entry.index - base > log.size()) break;
+        const auto& local = log[entry.index - base - 1];
         if (local.term != entry.term) {
             if (entry.index <= commit_state.commit_index) return {{term_vote.current_term, false}, std::nullopt};
             break;
@@ -50,11 +52,11 @@ inline HeartbeatResult handle_heartbeat(
     std::optional<std::uint64_t> changed_from;
     if (first_new < request.entries.size()) {
         changed_from = request.entries[first_new].index;
-        log.resize(static_cast<std::size_t>(*changed_from - 1));
+        log.resize(static_cast<std::size_t>(*changed_from - base - 1));
         log.insert(log.end(), request.entries.begin() + first_new, request.entries.end());
     }
-    log_state.last_log_index = log.empty() ? 0 : log.back().index;
-    log_state.last_log_term = log.empty() ? 0 : log.back().term;
+    log_state.last_log_index = log.empty() ? base : log.back().index;
+    log_state.last_log_term = log.empty() ? log_state.snapshot_term : log.back().term;
     const auto matched_index = request.entries.empty() ? request.prev_log_index : request.entries.back().index;
     commit_state.commit_index = std::max(commit_state.commit_index, std::min(request.leader_commit, matched_index));
     return {{term_vote.current_term, true}, changed_from};

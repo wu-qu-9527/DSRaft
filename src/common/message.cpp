@@ -20,6 +20,8 @@ void validate_type(MessageType type) {
     case MessageType::heartbeat:
     case MessageType::heartbeat_response:
     case MessageType::client_request:
+    case MessageType::install_snapshot:
+    case MessageType::install_snapshot_response:
         return;
     }
     throw std::invalid_argument("Unknown message type");

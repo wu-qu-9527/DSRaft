@@ -16,6 +16,8 @@ enum class MessageType : std::uint32_t {
     heartbeat = 6,
     heartbeat_response = 7,
     client_request = 8,
+    install_snapshot = 9,
+    install_snapshot_response = 10,
 };
 
 // Shared application message. Never transmit the raw struct (it contains a string).

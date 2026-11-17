@@ -21,6 +21,8 @@ struct TermVoteState {
 struct LogState {
     std::uint64_t last_log_index{0};
     std::uint64_t last_log_term{0};
+    std::uint64_t snapshot_index{0};
+    std::uint64_t snapshot_term{0};
 };
 
 // The committed prefix is checkpointed before state-machine application.

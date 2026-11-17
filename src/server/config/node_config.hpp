@@ -23,6 +23,7 @@ struct NodeConfig {
     std::chrono::milliseconds election_timeout_min{150};
     std::chrono::milliseconds election_timeout_max{300};
     std::filesystem::path data_dir; // Empty uses data/node-<id> beside the executable.
+    std::uint64_t snapshot_threshold{1000}; // Applied entries between snapshots; zero disables local compaction.
 };
 
 } // namespace zmq_template::server

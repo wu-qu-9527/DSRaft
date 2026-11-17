@@ -18,6 +18,7 @@ void print_help() {
               << "  --heartbeat-interval-ms MS      Heartbeat send interval (default: 50)\n"
               << "  --heartbeat-timeout-ms MS       Heartbeat RPC timeout (default: 100)\n"
               << "  --vote-timeout-ms MS            Vote RPC timeout (default: 100)\n"
+              << "  --snapshot-threshold N         Applied entries per snapshot (default: 1000; 0 disables)\n"
               << "  --election-timeout-min-ms MS    Minimum election timeout (default: 150)\n"
               << "  --election-timeout-max-ms MS    Maximum election timeout (default: 300)\n"
               << "All times are positive integer milliseconds. Heartbeat interval must be less\n"
